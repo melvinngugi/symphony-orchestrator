@@ -1,4 +1,5 @@
-# test_jira.py
+# To verify the Jira API tracking and connection infrastructure, run the integrated diagnostic script.
+
 import json
 import requests
 from requests.auth import HTTPBasicAuth
