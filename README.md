@@ -1,9 +1,10 @@
 # Symphony Orchestrator
 
-Symphony Orchestrator is a custom multi-agent orchestration application designed to bridge project management workflows with automated development cycles. By integrating directly with **Jira** and **Bitbucket**, Symphony acts as an intelligent execution layer that tracks backlog states, parses repository execution contracts, and manages autonomous agent workspaces.
+Symphony Orchestrator is a custom multi-agent orchestration framework, built from the ground up according to OpenAI's open-source specifications. The project is focused on providing a lightweight, deterministic execution layer that bridges high-level project management systems with automated development environments. By shifting the complexity away from brittle, hardcoded pipelines, this framework implements intelligent agents to parse repository execution contracts, manage isolated workspaces, and execute development tasks autonomously.
 
 ## Features
 
+- **Specification-Driven Orchestration**: Implements OpenAI's architectural concepts to translate repository contracts into deterministic agent actions.
 - **Jira Backlog Tracking Client**: Synchronizes with Jira Cloud APIs using modern JQL queries to fetch candidate issues from specified active states (`To Do`, `In Progress`).
 - **Data Normalization**: Transforms raw vendor API payloads into a stable, internal Core Domain Model.
 - **Isolated Workspace Management**: Designed to execute secure tasks within deterministic development sandboxes.
@@ -36,3 +37,8 @@ Ensure you have Python 3.14+ installed. It is recommended to run the application
 
 4. **Environment Variables:**
    Create a .env file in the root directory and configure your credentials.
+   ```bash
+   JIRA_HOST="https://your-domain.atlassian.net"
+   JIRA_USER_EMAIL="your-email@example.com"
+   JIRA_API_TOKEN="your-atlassian-api-token"
+   JIRA_PROJECT_KEY="your-key"
