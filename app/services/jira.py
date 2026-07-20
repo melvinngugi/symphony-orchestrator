@@ -39,7 +39,7 @@ class JiraClient:
         states_jql = ", ".join([f"'{state}'" for state in active_states])
         jql = f"project = '{settings.JIRA_PROJECT_KEY}' AND status IN ({states_jql}) ORDER BY priority ASC, created ASC"
         
-        # FIXED: Appended /jql to migrate to the mandatory Atlassian endpoint
+        # Appended /jql to migrate to the mandatory Atlassian endpoint
         url = f"{self.base_url}/rest/api/3/search/jql"
         params = {"jql": jql, "maxResults": 50}
         
@@ -59,7 +59,7 @@ class JiraClient:
         ids_jql = ", ".join([f"'{id_}'" for id_ in issue_ids])
         jql = f"id IN ({ids_jql})"
         
-        # FIXED: Appended /jql to prevent 410 Gone errors
+        # Appended /jql to prevent 410 Gone errors
         url = f"{self.base_url}/rest/api/3/search/jql"
         params = {"jql": jql, "fields": "status,summary,description,priority,labels,created,updated"}
         
@@ -69,3 +69,46 @@ class JiraClient:
             
         issues = response.json().get("issues", [])
         return [self._normalize_issue(i) for i in issues]
+
+    def transition_issue(self, issue_key: str, target_status_name: str) -> bool:
+        """
+        Transitions a Jira issue to a target status by looking up its available transitions.
+        """
+        # Reuse self.headers but ensure Content-Type is added for the upcoming POST request
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        
+        # Use self.base_url and self.auth which are already configured in __init__
+        transitions_url = f"{self.base_url}/rest/api/3/issue/{issue_key}/transitions"
+        
+        response = requests.get(transitions_url, headers=headers, auth=self.auth)
+        if response.status_code != 200:
+            print(f"Failed to fetch transitions for {issue_key}: {response.text}")
+            return False
+            
+        transitions = response.json().get("transitions", [])
+        transition_id = None
+        
+        # Find the transition ID that matches our target status name (case-insensitive)
+        for t in transitions:
+            if t.get("to", {}).get("name", "").lower() == target_status_name.lower():
+                transition_id = t.get("id")
+                break
+                
+        if not transition_id:
+            available = [t.get("to", {}).get("name") for t in transitions]
+            print(f"No valid transition found to '{target_status_name}' for {issue_key}. Available states: {available}")
+            return False
+            
+        # Execute the transition
+        payload = {"transition": {"id": transition_id}}
+        
+        print(f"Transitioning {issue_key} to '{target_status_name}' (ID: {transition_id})...")
+        post_response = requests.post(transitions_url, headers=headers, auth=self.auth, json=payload)
+        
+        if post_response.status_code == 204:
+            print(f"Successfully updated {issue_key} to '{target_status_name}'!")
+            return True
+        else:
+            print(f"Transition failed: {post_response.status_code} - {post_response.text}")
+            return False
