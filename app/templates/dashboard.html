@@ -1,12 +1,65 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Symphony Orchestrator</title>
+    <meta http-equiv="refresh" content="10">
     <style>
-        body { font-family: sans-serif; padding: 2rem; background: #1e1e1e; color: #fff; }
-        .card { background: #2d2d2d; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
+        body {
+            font-family: sans-serif;
+            padding: 2rem;
+            background: #1e1e1e;
+            color: #fff;
+        }
+
+        .card {
+            background: #2d2d2d;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+
+        .ticket-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .ticket-item {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #444;
+        }
+
+        .ticket-item:last-child {
+            border-bottom: none;
+        }
+
+        .ticket-id {
+            font-weight: bold;
+            color: #4fc3f7;
+        }
+
+        .ticket-title {
+            margin-left: 0.5rem;
+        }
+
+        .error-item {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #444;
+            color: #ff5252;
+        }
+
+        .error-item:last-child {
+            border-bottom: none;
+        }
+
+        .error-timestamp {
+            font-size: 0.8rem;
+            color: #aaa;
+            margin-right: 0.5rem;
+        }
     </style>
 </head>
+
 <body>
     <h1>Symphony Dashboard</h1>
     <div class="card">
@@ -14,5 +67,54 @@
         <p>Currently running agents: {{ active_count }}</p>
         <p>Total issues claimed: {{ claimed_count }}</p>
     </div>
+
+    <div class="card">
+        <h2>Recent Errors</h2>
+        {% if errors %}
+        <ul class="ticket-list">
+            {% for error in errors %}
+            <li class="error-item">
+                <span class="error-timestamp">[{{ error.timestamp }}]</span>
+                <span>{{ error.message }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No errors reported.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Active Tasks</h2>
+        {% if running_tickets %}
+        <ul class="ticket-list">
+            {% for ticket in running_tickets %}
+            <li class="ticket-item">
+                <span class="ticket-id">{{ ticket.identifier }}</span>
+                <span class="ticket-title">{{ ticket.title }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No active tasks.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Claimed History</h2>
+        {% if claimed_tickets %}
+        <ul class="ticket-list">
+            {% for ticket in claimed_tickets %}
+            <li class="ticket-item">
+                <span class="ticket-id">{{ ticket.identifier }}</span>
+                <span class="ticket-title">{{ ticket.title }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No tickets claimed yet.</p>
+        {% endif %}
+    </div>
 </body>
+
 </html>

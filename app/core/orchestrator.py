@@ -1,6 +1,7 @@
 import time
 import logging
-from app.models.state import OrchestratorState
+from datetime import datetime
+from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail
 from app.services.agent import AgentRunner
 from app.services.jira import JiraClient
 from app.services.bitbucket import BitbucketService
@@ -27,10 +28,49 @@ class SymphonyOrchestrator:
         logger.info("Starting Symphony Orchestrator daemon...")
         while True:
             try:
+                self._reconcile_running_tasks()
                 self._tick()
             except Exception as e:
                 logger.error(f"Error during orchestration tick: {e}")
+                self.add_error(f"Orchestration tick failure: {str(e)}")
             time.sleep(self.state.poll_interval_ms / 1000.0)
+
+    def add_error(self, message: str):
+        """Adds an error to the orchestrator state with a timestamp."""
+        error = ErrorDetail(
+            message=message,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        self.state.errors.insert(0, error)
+        # Keep only the last 50 errors
+        if len(self.state.errors) > 50:
+            self.state.errors.pop()
+
+    def _reconcile_running_tasks(self):
+        """Monitors running agent processes and handles completions or failures."""
+        completed_ids = []
+        for issue_id, task in self.state.running.items():
+            handle = task["handle"]
+            metadata = task["metadata"]
+            
+            exit_code = handle.poll()
+            if exit_code is not None:
+                completed_ids.append(issue_id)
+                if exit_code != 0:
+                    stderr_content = ""
+                    if handle.stderr:
+                        stderr_content = handle.stderr.read()
+                    error_msg = f"Agent failure for {metadata.identifier} (Exit {exit_code})"
+                    if stderr_content:
+                        error_msg += f": {stderr_content.strip()}"
+                    self.add_error(error_msg)
+                    logger.error(error_msg)
+                else:
+                    logger.info(f"Agent successfully completed task {metadata.identifier}")
+                    self.state.completed.add(issue_id)
+        
+        for issue_id in completed_ids:
+            del self.state.running[issue_id]
 
     def _tick(self):
         """Main reconciliation and dispatch loop."""
@@ -74,6 +114,7 @@ class SymphonyOrchestrator:
     def _dispatch(self, issue: dict):
         issue_id = issue["id"]
         identifier = issue.get("identifier")
+        title = issue.get("title", "Untitled")
         logger.info(f"Dispatching autonomous workflow for {identifier}")
         
         # Prepares workspace and clones repository via BitbucketService
@@ -82,9 +123,14 @@ class SymphonyOrchestrator:
         # Spawn the agent subprocess
         worker_handle = self.runner.spawn_worker(issue, workspace_path)
         
+        ticket_info = TicketMetadata(
+            identifier=identifier,
+            title=title,
+            started_at=time.time()
+        )
+        
         self.state.running[issue_id] = {
             "handle": worker_handle,
-            "identifier": identifier,
-            "started_at": time.time()
+            "metadata": ticket_info
         }
-        self.state.claimed.add(issue_id)
+        self.state.claimed[issue_id] = ticket_info
