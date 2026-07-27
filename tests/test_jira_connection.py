@@ -13,7 +13,7 @@ def diagnose_jira_backlog():
     url = f"{settings.JIRA_HOST.rstrip('/')}/rest/api/3/search/jql"
     
     jql = f"project = '{settings.JIRA_PROJECT_KEY}' ORDER BY created DESC"
-    params = {"jql": jql, "maxResults": 10, "fields": "status,summary"}
+    params = {"jql": jql, "maxResults": 10, "fields": "id,status,summary"}
     
     response = requests.get(url, headers={"Accept": "application/json"}, auth=auth, params=params)
     
@@ -24,6 +24,7 @@ def diagnose_jira_backlog():
     issues = response.json().get("issues", [])
     if not issues:
         print(f"Zero issues found in project '{settings.JIRA_PROJECT_KEY}'.")
+        print(f"Response: {response.json()}")
         return
 
     print(f"Found {len(issues)} total issues! Here are their exact workflow names:\n")

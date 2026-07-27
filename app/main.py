@@ -31,15 +31,29 @@ async def startup_event():
 
 @app.get("/")
 async def dashboard(request: Request):
-    active_count = len(global_orchestrator.state.running) if global_orchestrator else 0
-    claimed_count = len(global_orchestrator.state.claimed) if global_orchestrator else 0
+    running_tickets = []
+    claimed_tickets = []
+    errors = []
+    active_count = 0
+    claimed_count = 0
+
+    if global_orchestrator:
+        # running[issue_id] = {"handle": process, "metadata": TicketMetadata}
+        running_tickets = [v["metadata"] for v in global_orchestrator.state.running.values()]
+        claimed_tickets = list(global_orchestrator.state.claimed.values())
+        errors = global_orchestrator.state.errors
+        active_count = len(global_orchestrator.state.running)
+        claimed_count = len(global_orchestrator.state.claimed)
     
     return templates.TemplateResponse(
         request, 
         "dashboard.html", 
         {
             "active_count": active_count,
-            "claimed_count": claimed_count
+            "claimed_count": claimed_count,
+            "running_tickets": running_tickets,
+            "claimed_tickets": claimed_tickets,
+            "errors": errors
         }
     )
 
