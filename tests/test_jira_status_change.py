@@ -7,8 +7,8 @@ def test_manual_ticket_transition():
     client = JiraClient()
     
     # Specify manually created ticket here
-    target_ticket = "DFLW-48" 
-    target_status = "Done"
+    target_ticket = ""   # SPECIFY THE TICKET KEY HERE (e.g., "SHOP-2", "SHOP-3", etc.)
+    target_status = ""   # SPECIFY THE TARGET STATUS NAME HERE (e.g., "In Progress", "Done", etc.)
     
     print(f"Initializing status transition test for ticket: {target_ticket}")
     

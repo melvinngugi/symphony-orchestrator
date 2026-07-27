@@ -23,7 +23,7 @@ def diagnose_jira_backlog():
 
     issues = response.json().get("issues", [])
     if not issues:
-        print(f"ero issues found in project '{settings.JIRA_PROJECT_KEY}'.")
+        print(f"Zero issues found in project '{settings.JIRA_PROJECT_KEY}'.")
         return
 
     print(f"Found {len(issues)} total issues! Here are their exact workflow names:\n")
