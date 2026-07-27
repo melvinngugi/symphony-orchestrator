@@ -1,23 +1,29 @@
 # Symphony Orchestrator
 
-Symphony Orchestrator is a custom multi-agent orchestration framework, built from the ground up according to OpenAI's open-source specifications. The project is focused on providing a lightweight, deterministic execution layer that bridges high-level project management systems with automated development environments. By shifting the complexity away from brittle, hardcoded pipelines, this framework implements intelligent agents to parse repository execution contracts, manage isolated workspaces, and execute development tasks autonomously.
+Symphony Orchestrator is a custom multi-agent orchestration framework built from the ground up according to OpenAI's open-source specifications. It provides a lightweight, deterministic execution layer that bridges project management systems (Jira) with automated development environments and VCS platforms (Bitbucket). 
+
+By using intelligent, multi-stage agents, Symphony parses repository execution contracts, manages isolated sandboxes, executes code modifications, and handles PR workflows autonomously.
 
 ## Features
 
 - **Specification-Driven Orchestration**: Implements OpenAI's architectural concepts to translate repository contracts into deterministic agent actions.
-- **Jira Backlog Tracking Client**: Synchronizes with Jira Cloud APIs using modern JQL queries to fetch candidate issues from specified active states (`To Do`, `In Progress`).
-- **Data Normalization**: Transforms raw vendor API payloads into a stable, internal Core Domain Model.
-- **Isolated Workspace Management**: Designed to execute secure tasks within deterministic development sandboxes.
+- **Jira Backlog Tracking Client**: Synchronizes with Jira Cloud APIs via JQL to identify, filter, and dispatch candidate issues tagged for AI execution.
+- **Bitbucket VCS Integration**: Authenticates via scoped API tokens to clone repositories, isolate workspaces per ticket, check out feature branches, and submit Pull Requests.
+- **Isolated Workspace Management**: Creates clean, isolated execution sandboxes (`/tmp/symphony_workspaces/<TICKET-ID>`) for safe agent code generation and testing.
+- **Multi-Stage Agent Pipeline**: Features a modular pipeline architecture (`symphony.agent`) to analyze codebase context, generate targeted patches, and verify changes before committing.
+- **Core Domain Normalization**: Converts raw external vendor payloads (Jira/Bitbucket) into a unified, stable internal domain model.
 
 ## Tech Stack
 
-- **Backend Framework**: Python 3.14+ / FastAPI
+- **Backend Framework**: Python 3.14+ / FastAPI (Uvicorn)
 - **Data Validation & Settings**: Pydantic v2 & Pydantic Settings
-- **Configuration & Integration**: PyYAML, Requests, Python-dotenv
+- **Integrations & Operations**: PyYAML, Requests, Git, Python-dotenv
 
 ## Prerequisites
 
-Ensure you have Python 3.14+ installed. It is recommended to run the application inside an isolated environment (such as an Arch Linux Distrobox container).
+- Python 3.14+
+- `git` CLI installed on the host system
+- An active Jira Cloud workspace and Bitbucket repository
 
 ## Setup & Installation
 
@@ -35,10 +41,25 @@ Ensure you have Python 3.14+ installed. It is recommended to run the application
    ```bash
    pip install -r requirements.txt
 
-4. **Environment Variables:**
-   Create a .env file in the root directory and configure your credentials.
+4. **Environment Configuration:**
+   Create a .env file in the project root with your credentials:
    ```bash
+   #Jira Configuration
    JIRA_HOST="https://your-domain.atlassian.net"
    JIRA_USER_EMAIL="your-email@example.com"
    JIRA_API_TOKEN="your-atlassian-api-token"
    JIRA_PROJECT_KEY="your-key"
+
+   # Bitbucket Configuration
+   BITBUCKET_WORKSPACE="your-workspace"
+   BITBUCKET_REPO_SLUG="shopping-assistant"
+   BITBUCKET_USER_EMAIL="your-email@domain.com"
+   BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
+
+## Running the Orchestrator
+
+Start the FastAPI application and background orchestrator daemon:
+   ```bash
+   python -m app.main
+
+The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the ai label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.

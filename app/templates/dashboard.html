@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Symphony Orchestrator</title>
+    <style>
+        body { font-family: sans-serif; padding: 2rem; background: #1e1e1e; color: #fff; }
+        .card { background: #2d2d2d; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Symphony Dashboard</h1>
+    <div class="card">
+        <h2>System Status: Active</h2>
+        <p>Currently running agents: {{ active_count }}</p>
+        <p>Total issues claimed: {{ claimed_count }}</p>
+    </div>
+</body>
+</html>

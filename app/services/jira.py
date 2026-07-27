@@ -16,17 +16,23 @@ class JiraClient:
         Symphony Core Domain Model.
         """
         fields = jira_issue.get("fields", {})
-        labels = [label.strip().lower() for label in fields.get("labels", [])]
+        
+        # Ensure labels are safely extracted whether they are strings or objects
+        raw_labels = fields.get("labels", [])
+        labels = [str(label).strip().lower() for label in raw_labels]
+        
+        # Jira API v3 returns the key directly on the issue object, not inside fields
+        issue_key = jira_issue.get("key")
         
         return {
             "id": jira_issue.get("id"),
-            "identifier": jira_issue.get("key"),  # e.g., "SJB-101"
+            "identifier": issue_key,  # e.g., "DFLW-38"
             "title": fields.get("summary"),
             "description": fields.get("description"),
             "priority": int(fields.get("priority", {}).get("id", 3)) if fields.get("priority") else None,
             "state": fields.get("status", {}).get("name", "Unknown").lower(),
-            "branch_name": f"symphony/{jira_issue.get('key')}",
-            "url": f"{self.base_url}/browse/{jira_issue.get('key')}",
+            "branch_name": f"symphony/{issue_key}",
+            "url": f"{self.base_url}/browse/{issue_key}",
             "labels": labels,
             "blocked_by": [],
             "created_at": fields.get("created"),
@@ -41,7 +47,11 @@ class JiraClient:
         
         # Appended /jql to migrate to the mandatory Atlassian endpoint
         url = f"{self.base_url}/rest/api/3/search/jql"
-        params = {"jql": jql, "maxResults": 50}
+        params = {
+            "jql": jql, 
+            "maxResults": 50,
+            "fields": "summary,description,priority,status,labels,created,updated"
+        }
         
         response = requests.get(url, headers=self.headers, auth=self.auth, params=params)
         if response.status_code != 200:
