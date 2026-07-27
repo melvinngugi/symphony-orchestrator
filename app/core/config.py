@@ -1,6 +1,8 @@
 import os
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
+import yaml
+from typing import Dict, Any
 
 load_dotenv(override=True)
 
@@ -36,3 +38,18 @@ class Settings(BaseSettings):
             raise ValueError("Missing one or more critical Bitbucket configuration variables in .env")
 
 settings = Settings()
+
+def load_config(file_path: str = "WORKFLOW.md") -> Dict[str, Any]:
+    """Parses YAML configuration from the workflow definition."""
+    if not os.path.exists(file_path):
+        return {}
+        
+    with open(file_path, 'r') as f:
+        content = f.read()
+        
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            return yaml.safe_load(parts[1]) or {}
+            
+    return {}
