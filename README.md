@@ -61,5 +61,6 @@ By using intelligent, multi-stage agents, Symphony parses repository execution c
 Start the FastAPI application and background orchestrator daemon:
    ```bash
    python -m app.main
+   ```
 
 The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the ai label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.
