@@ -59,7 +59,7 @@ By using intelligent, multi-stage agents, Symphony parses repository execution c
 
    # Bitbucket Configuration
    BITBUCKET_WORKSPACE="your-workspace"
-   BITBUCKET_REPO_SLUG="shopping-assistant"
+   BITBUCKET_REPO_SLUG="your-repo"
    BITBUCKET_USER_EMAIL="your-email@domain.com"
    BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
 
@@ -71,7 +71,7 @@ Start the FastAPI application and background orchestrator daemon:
    python -m app.main
    ```
 
-The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the ai label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.
+The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the AI label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.
 
 ## Podman (Using uv)
 
