@@ -35,6 +35,14 @@ jobs:
             - name: Run pytest
               env:
                   PYTHONPATH: .
+                  JIRA_HOST: ${{ secrets.JIRA_HOST }}
+                  JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+                  JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+                  JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+                  BITBUCKET_WORKSPACE: ${{ secrets.BITBUCKET_WORKSPACE }}
+                  BITBUCKET_REPO_SLUG: ${{ secrets.BITBUCKET_REPO_SLUG }}
+                  BITBUCKET_USER_EMAIL: ${{ secrets.BITBUCKET_USER_EMAIL }}
+                  BITBUCKET_API_TOKEN: ${{ secrets.BITBUCKET_API_TOKEN }}
               run: pytest
 
     build-and-push:
