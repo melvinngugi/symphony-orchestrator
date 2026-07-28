@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     
     # Workspace Config
-    WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", "./symphony_workspaces")
+    WORKSPACE_ROOT: str = os.getenv("WORKSPACE_ROOT", "./workspaces")
 
     def validate_jira(self):
         if not all([self.JIRA_HOST, self.JIRA_USER_EMAIL, self.JIRA_API_TOKEN, self.JIRA_PROJECT_KEY]):

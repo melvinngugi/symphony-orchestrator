@@ -2,7 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
-symphony_workspaces/
+workspaces/
 .vscode/
 .idea/
 
