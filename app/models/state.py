@@ -7,6 +7,7 @@ class TicketMetadata:
     identifier: str
     title: str
     started_at: float
+    current_phase: Optional[str] = None
 
 @dataclass
 class ErrorDetail:

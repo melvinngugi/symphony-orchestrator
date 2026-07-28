@@ -92,6 +92,9 @@
             <li class="ticket-item">
                 <span class="ticket-id">{{ ticket.identifier }}</span>
                 <span class="ticket-title">{{ ticket.title }}</span>
+                {% if ticket.current_phase %}
+                <span style="color: #81c784; margin-left:1rem;">[Phase: {{ ticket.current_phase }}]</span>
+                {% endif %}
             </li>
             {% endfor %}
         </ul>

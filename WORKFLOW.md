@@ -13,16 +13,15 @@ tracker:
   required_labels:
     - "AI"
 
-workflow_stages:
-  - plan
-  - human_review_plan
-  - implement
-  - validate_test
-  - pull_request
-  - agent_review
-  - ready
-  - human_review_merge
+phases:
+  plan:
+    agent: planner
+  implement:
+    agent: implementer
+  validate:
+    agent: tester
 ---
 
 # Symphony Workflow Definition
+
 This configuration governs the multi-agent orchestration lifecycle for Jira tasks tagged with the "AI" label.

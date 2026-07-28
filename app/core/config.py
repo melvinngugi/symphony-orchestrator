@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 import yaml
 from typing import Dict, Any
+from app.models.agent_config import AgentsRegistry
 
 load_dotenv(override=True)
 
@@ -38,6 +39,14 @@ class Settings(BaseSettings):
             raise ValueError("Missing one or more critical Bitbucket configuration variables in .env")
 
 settings = Settings()
+
+def load_agents_config(file_path: str = "agents.yaml") -> AgentsRegistry:
+    """Loads agent definitions from agents.yaml and validates against Pydantic model."""
+    if not os.path.exists(file_path):
+        return AgentsRegistry(agents={})
+    with open(file_path, 'r') as f:
+        data = yaml.safe_load(f) or {}
+        return AgentsRegistry.model_validate(data)
 
 def load_config(file_path: str = "WORKFLOW.md") -> Dict[str, Any]:
     """Parses YAML configuration from the workflow definition."""
