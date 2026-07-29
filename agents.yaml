@@ -8,9 +8,11 @@ agents:
       - "{sandbox}"
       - "--output-schema"
       - "$SYMPHONY_HOME/agent-output-schema.json"
-      - "/plan Analyze the issue from stdi, provide a plan.md file if the issue is clear enough, otherwise mark the issue as insufficient input. Return the output in the requested structured schema"
+      - "--output-last-message"
+      - "{structured}"
+      - "/plan Analyze the issue from stdin, provide a plan.md file to implement the issue if it is clear enough, otherwise mark the issue as insufficient input. Return the output in the requested structured schema"
     stdin: "issue.json"
-    output_file: "plan.md"
+    structured: "planner-result.json"
     sandbox: "workspace-write"
     env:
       - "CODEX_API_KEY"
@@ -25,6 +27,7 @@ agents:
       - "Implement the following plan in the codebase."
     stdin: "plan.md"
     output_file: "implementation_report.json"
+    structured: "implementer-result.json"
     sandbox: "workspace-write"
     env:
       - "CODEX_API_KEY"
@@ -39,6 +42,7 @@ agents:
       - "Run tests based on the implementation provided."
     stdin: "implementation_report.json"
     output_file: "test_results.json"
+    structured: "tester-result.json"
     sandbox: "workspace-write"
     env:
       - "CODEX_API_KEY"

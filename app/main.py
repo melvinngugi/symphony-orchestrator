@@ -49,6 +49,8 @@ async def dashboard(request: Request):
     errors = []
     active_count = 0
     claimed_count = 0
+    blocked_tickets = []
+    blocked_count = 0
 
     if global_orchestrator:
         # running[issue_id] = {"handle": process, "metadata": TicketMetadata}
@@ -57,6 +59,8 @@ async def dashboard(request: Request):
         errors = global_orchestrator.state.errors
         active_count = len(global_orchestrator.state.running)
         claimed_count = len(global_orchestrator.state.claimed)
+        blocked_tickets = list(global_orchestrator.state.blocked.values())
+        blocked_count = len(global_orchestrator.state.blocked)
     
     return templates.TemplateResponse(
         request, 
@@ -64,7 +68,9 @@ async def dashboard(request: Request):
         {
             "active_count": active_count,
             "claimed_count": claimed_count,
+            "blocked_count": blocked_count,
             "running_tickets": running_tickets,
+            "blocked_tickets": blocked_tickets,
             "claimed_tickets": claimed_tickets,
             "errors": errors
         }

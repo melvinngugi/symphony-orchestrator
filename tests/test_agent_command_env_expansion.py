@@ -2,12 +2,13 @@ from app.models.agent_config import AgentConfig
 from app.services.agent import SubprocessAgentExecutionController
 
 
-def _make_agent_config(args):
+def _make_agent_config(args, structured=None):
     return AgentConfig(
         command="codex",
         args=args,
         stdin="issue.json",
         output_file="plan.md",
+        structured=structured,
         sandbox="workspace-write",
         env=[],
     )
@@ -81,3 +82,12 @@ def test_build_command_keeps_existing_placeholders_behavior():
     command = controller._build_command(config, {}, "planner")
 
     assert command == ["codex", "--output", "plan.md", "--sandbox", "workspace-write"]
+
+
+def test_build_command_renders_structured_placeholder_when_set():
+    controller = SubprocessAgentExecutionController()
+    config = _make_agent_config(["--result", "{structured}"], structured="planner-result.json")
+
+    command = controller._build_command(config, {}, "planner")
+
+    assert command == ["codex", "--result", "planner-result.json"]

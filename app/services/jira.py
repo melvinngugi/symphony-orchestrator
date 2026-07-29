@@ -122,3 +122,92 @@ class JiraClient:
         else:
             print(f"Transition failed: {post_response.status_code} - {post_response.text}")
             return False
+
+    def add_comment(self, issue_key: str, body: str) -> bool:
+        """
+        Adds a comment to a Jira issue.
+        """
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+
+        comments_url = f"{self.base_url}/rest/api/3/issue/{issue_key}/comment"
+        payload = {"body": self._build_adf_comment(body)}
+
+        response = requests.post(comments_url, headers=headers, auth=self.auth, json=payload)
+        if response.status_code in (200, 201):
+            print(f"Successfully added comment to {issue_key}!")
+            return True
+
+        print(f"Comment failed: {response.status_code} - {response.text}")
+        return False
+
+    def _build_adf_comment(self, body: str) -> Dict[str, Any]:
+        """
+        Converts plain-text comment content into Atlassian Document Format (ADF).
+        """
+        lines = body.splitlines()
+        content: List[Dict[str, Any]] = []
+        bullet_items: List[str] = []
+
+        def flush_bullets():
+            nonlocal bullet_items
+            if not bullet_items:
+                return
+            content.append(
+                {
+                    "type": "bulletList",
+                    "content": [
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [
+                                        {"type": "text", "text": item},
+                                    ],
+                                }
+                            ],
+                        }
+                        for item in bullet_items
+                    ],
+                }
+            )
+            bullet_items = []
+
+        for raw_line in lines:
+            if not raw_line.strip():
+                flush_bullets()
+                continue
+
+            stripped_line = raw_line.lstrip()
+            if stripped_line.startswith("- ") or stripped_line.startswith("* "):
+                bullet_text = stripped_line[2:].strip()
+                if bullet_text:
+                    bullet_items.append(bullet_text)
+                continue
+
+            flush_bullets()
+            content.append(
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": raw_line},
+                    ],
+                }
+            )
+
+        flush_bullets()
+
+        if not content:
+            content = [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": " "}],
+                }
+            ]
+
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": content,
+        }

@@ -16,10 +16,19 @@ tracker:
 phases:
   plan:
     agent: planner
+    transitions:
+      success: "In Progress"
+      blocked: "Clarification Needed"
   implement:
     agent: implementer
+    transitions:
+      success: "In Progress"
+      blocked: "Clarification Needed"
   validate:
     agent: tester
+    transitions:
+      success: "Done"
+      blocked: "Clarification Needed"
 ---
 
 # Symphony Workflow Definition

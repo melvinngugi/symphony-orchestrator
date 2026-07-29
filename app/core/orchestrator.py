@@ -5,7 +5,7 @@ import json
 from typing import Callable, Optional
 
 from app.models.agent_config import AgentsRegistry
-from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail
+from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail, BlockedTicketDetail
 from app.services.agent import (
     AgentExecutionController,
     AgentExecutionRequest,
@@ -120,7 +120,34 @@ class SymphonyOrchestrator:
                     self.add_error(error_msg)
                     logger.error(error_msg)
                 else:
-                    logger.info(f"Agent successfully completed phase {metadata.current_phase} for {metadata.identifier}")
+                    logger.info(f"Agent completed phase {metadata.current_phase} for {metadata.identifier}: result={result.status}")
+                    self._transition_for_phase_status(
+                        issue,
+                        metadata.current_phase,
+                        result.status,
+                        result.message,
+                        result.needed_clarifications or [],
+                    )
+
+                    if result.status == "blocked":
+                        self.state.blocked[issue_id] = BlockedTicketDetail(
+                            identifier=metadata.identifier,
+                            title=metadata.title,
+                            current_phase=metadata.current_phase,
+                            blocked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            message=result.message or "Blocked by agent result",
+                            needed_clarifications=result.needed_clarifications or [],
+                        )
+                        continue
+
+                    if result.status != "success":
+                        error_msg = (
+                            f"Unsupported agent status for {metadata.identifier} in phase "
+                            f"{metadata.current_phase}: {result.status}"
+                        )
+                        self.add_error(error_msg)
+                        logger.error(error_msg)
+                        continue
 
                     next_phase = self._get_next_phase(metadata.current_phase)
                     if next_phase:
@@ -209,3 +236,63 @@ class SymphonyOrchestrator:
         with open(issue_json_path, "w") as f:
             json.dump(issue, f, indent=2)
         logger.info(f"Created issue.json at {issue_json_path}")
+
+    def _transition_for_phase_status(
+        self,
+        issue: dict,
+        phase_name: str,
+        status: str,
+        message: str = "",
+        needed_clarifications: Optional[list[str]] = None,
+    ):
+        state_name = self._structured_target_state_for_phase(phase_name, status)
+        if not state_name:
+            return
+
+        issue_key = issue.get("identifier")
+        if not issue_key:
+            logger.warning(f"Skipping structured transition for issue without identifier in phase {phase_name}")
+            return
+
+        agent_name = self._agent_name_for_phase(phase_name)
+        comment_body = self._build_agent_comment(agent_name, message, needed_clarifications or [])
+        if comment_body:
+            try:
+                self.jira.add_comment(issue_key=issue_key, body=comment_body)
+            except Exception as e:
+                logger.error(f"Failed Jira comment for {issue_key} in phase {phase_name}: {e}")
+
+        try:
+            self.jira.transition_issue(issue_key=issue_key, target_status_name=state_name)
+        except Exception as e:
+            logger.error(
+                f"Failed Jira transition for {issue_key} on structured status '{status}' in phase {phase_name}: {e}"
+            )
+
+    def _structured_target_state_for_phase(self, phase_name: str, status: str) -> Optional[str]:
+        phase_config = self.config.get("phases", {}).get(phase_name, {})
+        transitions_cfg = phase_config.get("transitions")
+        if not isinstance(transitions_cfg, dict):
+            return None
+
+        target = transitions_cfg.get(status)
+        return target if isinstance(target, str) and target.strip() else None
+
+    def _agent_name_for_phase(self, phase_name: str) -> str:
+        phase_config = self.config.get("phases", {}).get(phase_name, {})
+        agent_name = phase_config.get("agent")
+        return agent_name if isinstance(agent_name, str) and agent_name.strip() else "unknown"
+
+    def _build_agent_comment(self, agent_name: str, message: str, needed_clarifications: list[str]) -> str:
+        clean_message = message.strip() if isinstance(message, str) else ""
+        clean_clarifications = [str(item).strip() for item in needed_clarifications if str(item).strip()]
+
+        if not clean_message and not clean_clarifications:
+            return ""
+
+        comment_lines = [f"[agent {agent_name}]: {clean_message}" if clean_message else f"[agent {agent_name}]: "]
+        if clean_clarifications:
+            comment_lines.append("")
+            comment_lines.extend(f"* {clarification}" for clarification in clean_clarifications)
+
+        return "\n".join(comment_lines)
