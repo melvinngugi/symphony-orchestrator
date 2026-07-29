@@ -12,6 +12,31 @@ By using intelligent, multi-stage agents, Symphony parses repository execution c
 - **Isolated Workspace Management**: Creates clean, isolated execution sandboxes (`/tmp/symphony_workspaces/<TICKET-ID>`) for safe agent code generation and testing.
 - **Multi-Stage Agent Pipeline**: Features a modular pipeline architecture (`symphony.agent`) to analyze codebase context, generate targeted patches, and verify changes before committing.
 - **Core Domain Normalization**: Converts raw external vendor payloads (Jira/Bitbucket) into a unified, stable internal domain model.
+- **Structured Agent Routing**: Agents can emit structured JSON results that drive workflow routing, artifact extraction, and blocked-queue handling.
+
+## Structured Agent Output
+
+An agent definition in `agents.yaml` may include a `structured` property with a non-empty filename (for example `structured: "planner-result.json"`).
+
+When `structured` is set:
+
+- The agent writes its result to that JSON file in the workspace using the schema contract from `agent-output-schema.json`.
+- The orchestrator reads the file after agent completion.
+- If `status == "success"`, each item in `outputs` is written to the workspace (`text` or base64 `binary`) and the workflow advances to the next phase.
+- If `status == "blocked"`, the issue is moved to the orchestrator blocked queue and does not advance to the next phase.
+
+Phase-level Jira transitions for structured outcomes are configured in `WORKFLOW.md` under each phase:
+
+```yaml
+phases:
+   plan:
+      agent: planner
+      transitions:
+         success: "In Progress"
+         blocked: "Clarification Needed"
+```
+
+`transitions.success` and `transitions.blocked` are optional. If omitted, no Jira transition is attempted for that outcome.
 
 ## Tech Stack
 

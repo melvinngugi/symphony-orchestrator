@@ -1,0 +1,48 @@
+agents:
+  planner:
+    command: "codex"
+    args:
+      - "exec"
+      - "--ephemeral"
+      - "--sandbox"
+      - "{sandbox}"
+      - "--output-schema"
+      - "$SYMPHONY_HOME/agent-output-schema.json"
+      - "--output-last-message"
+      - "{structured}"
+      - "/plan Analyze the issue from stdin, provide a plan.md file to implement the issue if it is clear enough, otherwise mark the issue as insufficient input. Return the output in the requested structured schema"
+    stdin: "issue.json"
+    structured: "planner-result.json"
+    sandbox: "workspace-write"
+    env:
+      - "CODEX_API_KEY"
+
+  implementer:
+    command: "codex"
+    args:
+      - "exec"
+      - "--ephemeral"
+      - "--sandbox"
+      - "{sandbox}"
+      - "Implement the following plan in the codebase."
+    stdin: "plan.md"
+    output_file: "implementation_report.json"
+    structured: "implementer-result.json"
+    sandbox: "workspace-write"
+    env:
+      - "CODEX_API_KEY"
+
+  tester:
+    command: "codex"
+    args:
+      - "exec"
+      - "--ephemeral"
+      - "--sandbox"
+      - "{sandbox}"
+      - "Run tests based on the implementation provided."
+    stdin: "implementation_report.json"
+    output_file: "test_results.json"
+    structured: "tester-result.json"
+    sandbox: "workspace-write"
+    env:
+      - "CODEX_API_KEY"

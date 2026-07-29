@@ -1,0 +1,65 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "title": "Agent Output Schema",
+    "description": "The agent shall return its output in this schema. This allows passing information back on the quality of the input and re-route the ticket in case of insufficient input",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "success",
+                "blocked"
+            ],
+            "description": "Status of the agent execution"
+        },
+        "message": {
+            "type": "string",
+            "description": "Output message from the agent"
+        },
+        "neededClarifications": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "Clarifications needed when status is 'blocked'; otherwise an empty array"
+        },
+        "outputs": {
+            "type": "array",
+            "description": "Files returned by the agent",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the output file"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content of the file, either text or binary base64 coded"
+                    },
+                    "contentType": {
+                        "type": "string",
+                        "enum": [
+                            "text",
+                            "binary"
+                        ],
+                        "description": "Define the content type of the property 'content'. If 'binary', then content is the base64 encoded value of binary content"
+                    }
+                },
+                "required": [
+                    "name",
+                    "content",
+                    "contentType"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    "required": [
+        "status",
+        "message",
+        "neededClarifications",
+        "outputs"
+    ],
+    "additionalProperties": false
+}

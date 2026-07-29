@@ -66,6 +66,32 @@
         <h2>System Status: Active</h2>
         <p>Currently running agents: {{ active_count }}</p>
         <p>Total issues claimed: {{ claimed_count }}</p>
+        <p>Blocked tickets: {{ blocked_count }}</p>
+    </div>
+
+    <div class="card">
+        <h2>Blocked Queue</h2>
+        {% if blocked_tickets %}
+        <ul class="ticket-list">
+            {% for ticket in blocked_tickets %}
+            <li class="ticket-item">
+                <span class="ticket-id">{{ ticket.identifier }}</span>
+                <span class="ticket-title">{{ ticket.title }}</span>
+                {% if ticket.current_phase %}
+                <span style="color: #ffb74d; margin-left:1rem;">[Phase: {{ ticket.current_phase }}]</span>
+                {% endif %}
+                <div style="margin-top: 0.35rem; color: #ffcc80;">{{ ticket.message }}</div>
+                {% if ticket.needed_clarifications %}
+                <div style="margin-top: 0.2rem; color: #ffe0b2; font-size: 0.9rem;">
+                    Needed clarifications: {{ ticket.needed_clarifications | join(', ') }}
+                </div>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No blocked tickets.</p>
+        {% endif %}
     </div>
 
     <div class="card">
@@ -92,6 +118,9 @@
             <li class="ticket-item">
                 <span class="ticket-id">{{ ticket.identifier }}</span>
                 <span class="ticket-title">{{ ticket.title }}</span>
+                {% if ticket.current_phase %}
+                <span style="color: #81c784; margin-left:1rem;">[Phase: {{ ticket.current_phase }}]</span>
+                {% endif %}
             </li>
             {% endfor %}
         </ul>
