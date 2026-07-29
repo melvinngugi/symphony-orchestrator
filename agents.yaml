@@ -6,12 +6,14 @@ agents:
       - "--ephemeral"
       - "--sandbox"
       - "{sandbox}"
-      - "/plan Analyze the issue from stdin and provide a plan.md file."
+      - "--output-schema"
+      - "$SYMPHONY_HOME/agent-output-schema.json"
+      - "/plan Analyze the issue from stdi, provide a plan.md file if the issue is clear enough, otherwise mark the issue as insufficient input. Return the output in the requested structured schema"
     stdin: "issue.json"
     output_file: "plan.md"
     sandbox: "workspace-write"
     env:
-      CODEX_API_KEY: "${OPENAI_API_KEY}"
+      - "CODEX_API_KEY"
 
   implementer:
     command: "codex"
@@ -25,7 +27,7 @@ agents:
     output_file: "implementation_report.json"
     sandbox: "workspace-write"
     env:
-      CODEX_API_KEY: "${OPENAI_API_KEY}"
+      - "CODEX_API_KEY"
 
   tester:
     command: "codex"
@@ -39,4 +41,4 @@ agents:
     output_file: "test_results.json"
     sandbox: "workspace-write"
     env:
-      CODEX_API_KEY: "${OPENAI_API_KEY}"
+      - "CODEX_API_KEY"

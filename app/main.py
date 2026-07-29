@@ -1,6 +1,8 @@
 import logging
 import asyncio
 import threading
+import os
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -12,6 +14,16 @@ from app.core.orchestrator import SymphonyOrchestrator
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("symphony.main")
 
+
+def ensure_symphony_home() -> None:
+    current_value = os.getenv("SYMPHONY_HOME", "")
+    if current_value:
+        return
+
+    symphony_home = str(Path(__file__).resolve().parents[1])
+    os.environ["SYMPHONY_HOME"] = symphony_home
+    logger.info(f"SYMPHONY_HOME not set; defaulting to {symphony_home}")
+
 # Initialize App & Templates
 app = FastAPI()
 templates = Jinja2Templates(directory="app/templates")
@@ -22,6 +34,7 @@ global_orchestrator = None
 @app.on_event("startup")
 async def startup_event():
     global global_orchestrator
+    ensure_symphony_home()
     config = load_config("WORKFLOW.md")
     global_orchestrator = SymphonyOrchestrator(config)
     
@@ -59,5 +72,6 @@ async def dashboard(request: Request):
 
 if __name__ == "__main__":
     logger.info("Starting Symphony Server...")
+    ensure_symphony_home()
     # Execute this file to start both the background daemon and the UI on port 8000
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

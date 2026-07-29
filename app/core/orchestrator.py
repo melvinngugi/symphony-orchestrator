@@ -1,10 +1,16 @@
 import time
 import logging
 from datetime import datetime
-import os
 import json
+from typing import Callable, Optional
+
+from app.models.agent_config import AgentsRegistry
 from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail
-from app.services.agent import AgentRunner
+from app.services.agent import (
+    AgentExecutionController,
+    AgentExecutionRequest,
+    SubprocessAgentExecutionController,
+)
 from app.services.jira import JiraClient
 from app.services.bitbucket import BitbucketService
 from app.core.config import load_agents_config
@@ -12,15 +18,25 @@ from app.core.config import load_agents_config
 logger = logging.getLogger("symphony.orchestrator")
 
 class SymphonyOrchestrator:
-    def __init__(self, config: dict):
+    def __init__(
+        self,
+        config: dict,
+        *,
+        agents_registry: Optional[AgentsRegistry] = None,
+        execution_controller: Optional[AgentExecutionController] = None,
+        jira_client: Optional[JiraClient] = None,
+        bitbucket_service: Optional[BitbucketService] = None,
+        issue_writer: Optional[Callable[[str, dict], None]] = None,
+    ):
         self.config = config
-        self.agents_config = load_agents_config()
+        self.agents_config = agents_registry or load_agents_config()
         self.state = OrchestratorState()
         
         # Instantiate existing services
-        self.jira = JiraClient()
-        self.bitbucket = BitbucketService()
-        self.runner = AgentRunner()
+        self.jira = jira_client or JiraClient()
+        self.bitbucket = bitbucket_service or BitbucketService()
+        self.execution_controller = execution_controller or SubprocessAgentExecutionController()
+        self.issue_writer = issue_writer or self._write_issue_json
 
         # Apply config overrides
         if "polling" in self.config:
@@ -88,53 +104,23 @@ class SymphonyOrchestrator:
         to_dispatch_next = [] # List of (issue_id, next_phase)
         
         for issue_id, task in self.state.running.items():
-            handle = task["handle"]
             metadata = task["metadata"]
             workspace_path = task["workspace_path"]
             issue = task["issue"]
+            execution = task["execution"]
             
-            exit_code = handle.poll()
-            if exit_code is not None:
+            result = self.execution_controller.poll_execution(execution)
+            if result is not None:
                 completed_ids.append(issue_id)
-                stdout_content, _ = handle.communicate()
-                
-                # Retrieve stderr from the log file (skipping the first line which is the command)
-                stderr_content = ""
-                phase_config = self.config.get("phases", {}).get(metadata.current_phase)
-                if phase_config:
-                    agent_name = phase_config.get("agent")
-                    log_file_path = os.path.join(workspace_path, "log", f"{agent_name}.log")
-                    if os.path.exists(log_file_path):
-                        try:
-                            with open(log_file_path, "r") as f:
-                                # Skip command line
-                                f.readline()
-                                stderr_content = f.read()
-                        except Exception as e:
-                            logger.error(f"Failed to read stderr from {log_file_path}: {e}")
 
-                if exit_code != 0:
-                    error_msg = f"Agent failure for {metadata.identifier} in phase {metadata.current_phase} (Exit {exit_code})"
-                    if stderr_content:
-                        error_msg += f": {stderr_content.strip()}"
+                if result.exit_code != 0:
+                    error_msg = f"Agent failure for {metadata.identifier} in phase {metadata.current_phase} (Exit {result.exit_code})"
+                    if result.stderr:
+                        error_msg += f": {result.stderr.strip()}"
                     self.add_error(error_msg)
                     logger.error(error_msg)
                 else:
                     logger.info(f"Agent successfully completed phase {metadata.current_phase} for {metadata.identifier}")
-                    
-                    # Orchestrator writes the output file from stdout
-                    phase_config = self.config.get("phases", {}).get(metadata.current_phase)
-                    if phase_config:
-                        agent_name = phase_config.get("agent")
-                        agent_config = self.agents_config.agents.get(agent_name)
-                        if agent_config and agent_config.output_file:
-                            output_path = os.path.join(workspace_path, agent_config.output_file)
-                            try:
-                                with open(output_path, "w") as f:
-                                    f.write(stdout_content)
-                                logger.info(f"Wrote agent output to {output_path}")
-                            except Exception as e:
-                                logger.error(f"Failed to write output file {output_path}: {e}")
 
                     next_phase = self._get_next_phase(metadata.current_phase)
                     if next_phase:
@@ -174,24 +160,14 @@ class SymphonyOrchestrator:
             return
 
         logger.info(f"Dispatching phase {phase_name} for {identifier} using agent {agent_name}")
-        
-        # Prepare stdin content from the file specified in agent_config.stdin
-        stdin_content = ""
-        stdin_file = agent_config.stdin
-        
-        if stdin_file:
-            stdin_file_path = os.path.join(workspace_path, stdin_file)
-            if os.path.exists(stdin_file_path):
-                try:
-                    with open(stdin_file_path, 'r') as f:
-                        stdin_content = f.read()
-                    logger.info(f"Read stdin content from {stdin_file_path}")
-                except Exception as e:
-                    logger.error(f"Failed to read stdin file {stdin_file_path}: {e}")
-            else:
-                logger.warning(f"Stdin file {stdin_file_path} not found for phase {phase_name}")
-
-        worker_handle = self.runner.spawn_worker(agent_name, issue, agent_config, workspace_path, stdin_content)
+        execution = self.execution_controller.start_execution(
+            AgentExecutionRequest(
+                agent_name=agent_name,
+                issue=issue,
+                agent_config=agent_config,
+                workspace_path=workspace_path,
+            )
+        )
         
         if issue_id in self.state.claimed:
             metadata = self.state.claimed[issue_id]
@@ -206,7 +182,7 @@ class SymphonyOrchestrator:
         metadata.current_phase = phase_name
         
         self.state.running[issue_id] = {
-            "handle": worker_handle,
+            "execution": execution,
             "metadata": metadata,
             "workspace_path": workspace_path,
             "issue": issue
@@ -215,13 +191,9 @@ class SymphonyOrchestrator:
     def _dispatch(self, issue: dict):
         identifier = issue.get("identifier")
         workspace_path = self.bitbucket.prepare_workspace(identifier)
-        
-        # Create issue.json in the workspace
-        issue_json_path = os.path.join(workspace_path, "issue.json")
+
         try:
-            with open(issue_json_path, "w") as f:
-                json.dump(issue, f, indent=2)
-            logger.info(f"Created issue.json at {issue_json_path}")
+            self.issue_writer(workspace_path, issue)
         except Exception as e:
             logger.error(f"Failed to create issue.json: {e}")
 
@@ -231,3 +203,9 @@ class SymphonyOrchestrator:
             self._dispatch_phase(issue, workspace_path, phases[0])
         else:
             logger.error("No phases defined in WORKFLOW.md")
+
+    def _write_issue_json(self, workspace_path: str, issue: dict):
+        issue_json_path = f"{workspace_path}/issue.json"
+        with open(issue_json_path, "w") as f:
+            json.dump(issue, f, indent=2)
+        logger.info(f"Created issue.json at {issue_json_path}")
