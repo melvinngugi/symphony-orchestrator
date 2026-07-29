@@ -3,6 +3,7 @@ import asyncio
 import threading
 import os
 from pathlib import Path
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -14,6 +15,9 @@ from app.core.orchestrator import SymphonyOrchestrator
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("symphony.main")
 
+# Global reference to orchestrator for the dashboard
+global_orchestrator = None
+
 
 def ensure_symphony_home() -> None:
     current_value = os.getenv("SYMPHONY_HOME", "")
@@ -24,23 +28,22 @@ def ensure_symphony_home() -> None:
     os.environ["SYMPHONY_HOME"] = symphony_home
     logger.info(f"SYMPHONY_HOME not set; defaulting to {symphony_home}")
 
-# Initialize App & Templates
-app = FastAPI()
-templates = Jinja2Templates(directory="app/templates")
-
-# Global reference to orchestrator for the dashboard
-global_orchestrator = None
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     global global_orchestrator
     ensure_symphony_home()
     config = load_config("WORKFLOW.md")
     global_orchestrator = SymphonyOrchestrator(config)
-    
+
     # Run the orchestrator loop in a separate thread so it doesn't block the dashboard API
     daemon_thread = threading.Thread(target=global_orchestrator.start, daemon=True)
     daemon_thread.start()
+
+    yield
+
+# Initialize App & Templates
+app = FastAPI(lifespan=lifespan)
+templates = Jinja2Templates(directory="app/templates")
 
 @app.get("/")
 async def dashboard(request: Request):
