@@ -293,6 +293,6 @@ class SymphonyOrchestrator:
         comment_lines = [f"[agent {agent_name}]: {clean_message}" if clean_message else f"[agent {agent_name}]: "]
         if clean_clarifications:
             comment_lines.append("")
-            comment_lines.extend(f"* {clarification}" for clarification in clean_clarifications)
+            comment_lines.extend(f"- {clarification}" for clarification in clean_clarifications)
 
         return "\n".join(comment_lines)

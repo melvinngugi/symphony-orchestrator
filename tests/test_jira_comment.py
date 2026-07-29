@@ -5,7 +5,7 @@ from app.services.jira import JiraClient
 
 
 def test_add_comment_posts_adf_payload(monkeypatch):
-    monkeypatch.setattr(jira_module.settings, "validate_jira", lambda: None)
+    monkeypatch.setattr(type(jira_module.settings), "validate_jira", lambda self: None)
     monkeypatch.setattr(jira_module.settings, "JIRA_USER_EMAIL", "bot@example.com")
     monkeypatch.setattr(jira_module.settings, "JIRA_API_TOKEN", "token")
     monkeypatch.setattr(jira_module.settings, "JIRA_HOST", "https://example.atlassian.net")
@@ -41,7 +41,7 @@ def test_add_comment_posts_adf_payload(monkeypatch):
 
 
 def test_add_comment_supports_jira_markdown_star_bullets(monkeypatch):
-    monkeypatch.setattr(jira_module.settings, "validate_jira", lambda: None)
+    monkeypatch.setattr(type(jira_module.settings), "validate_jira", lambda self: None)
     monkeypatch.setattr(jira_module.settings, "JIRA_USER_EMAIL", "bot@example.com")
     monkeypatch.setattr(jira_module.settings, "JIRA_API_TOKEN", "token")
     monkeypatch.setattr(jira_module.settings, "JIRA_HOST", "https://example.atlassian.net")
