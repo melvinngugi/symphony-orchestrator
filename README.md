@@ -22,7 +22,7 @@ When `structured` is set:
 
 - The agent writes its result to that JSON file in the workspace using the schema contract from `agent-output-schema.json`.
 - The orchestrator reads the file after agent completion.
-- If `status == "success"`, each item in `outputs` is written to the workspace (`text` or base64 `binary`) and the workflow advances to the next phase.
+- If `status == "success"`, each item in `outputs` is written to the workspace (`text` or base64 `binary`). A later Jira poll dispatches the phase whose `states` contain the issue's new Jira state.
 - If `status == "blocked"`, the issue is moved to the orchestrator blocked queue and does not advance to the next phase.
 
 Phase-level Jira transitions for structured outcomes are configured in `WORKFLOW.md` under each phase:
@@ -31,12 +31,17 @@ Phase-level Jira transitions for structured outcomes are configured in `WORKFLOW
 phases:
    plan:
       agent: planner
+      states:
+         - "To Do"
       transitions:
-         success: "In Progress"
+         on_start: "In Progress"
+         success: "In Review"
          blocked: "Clarification Needed"
 ```
 
-`transitions.success` and `transitions.blocked` are optional. If omitted, no Jira transition is attempted for that outcome.
+`transitions.on_start`, `transitions.success`, and `transitions.blocked` are optional. When `on_start` is configured, the Jira transition must succeed before the phase agent launches. A failed start transition records an orchestration error, does not launch the agent, and leaves the issue eligible for a later polling retry. No Jira comment is added for this transition. If an outcome transition is omitted, no Jira transition is attempted for that outcome.
+
+Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
 
 ## Tech Stack
 

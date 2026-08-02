@@ -8,6 +8,7 @@ class TicketMetadata:
     title: str
     started_at: float
     current_phase: Optional[str] = None
+    workspace_path: Optional[str] = None
 
 @dataclass
 class ErrorDetail:

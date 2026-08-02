@@ -56,11 +56,15 @@ class SymphonyOrchestrator:
             time.sleep(self.state.poll_interval_ms / 1000.0)
 
     def _tick(self):
-        """Polls for new work from Jira based on the tracker config."""
+        """Polls Jira and dispatches each issue to the phase matching its state."""
         tracker_config = self.config.get("tracker", {})
-        active_states = tracker_config.get("active_states", ["To Do"])
         required_labels = tracker_config.get("required_labels", [])
-        
+
+        active_states = self._configured_phase_states()
+        if not active_states:
+            logger.error("No Jira states defined under phases.*.states in WORKFLOW.md")
+            return
+
         # 1. Fetch candidates from tracker (Jira)
         candidates = self.jira.fetch_candidate_issues(active_states)
         
@@ -82,10 +86,55 @@ class SymphonyOrchestrator:
                 if not any(label.lower() in [l.lower() for l in labels] for label in required_labels):
                     continue
                 
-            # If not already claimed, claim and start dispatch
-            if issue_id not in self.state.claimed:
-                logger.info(f"Claiming and starting issue {issue.get('identifier')}")
-                self._dispatch(issue)
+            phase_name = self._phase_for_issue_state(issue.get("state"))
+            if not phase_name:
+                continue
+
+            # Do not execute the same phase repeatedly while Jira still reports
+            # the state that triggered the completed execution.
+            metadata = self.state.claimed.get(issue_id)
+            if metadata and metadata.current_phase == phase_name:
+                continue
+
+            logger.info(
+                f"Claiming issue {issue.get('identifier')} in Jira state "
+                f"{issue.get('state')} for phase {phase_name}"
+            )
+            self._dispatch(issue, phase_name)
+
+    def _configured_phase_states(self) -> list[str]:
+        """Return the unique Jira states configured by phases, in workflow order."""
+        states: list[str] = []
+        seen: set[str] = set()
+        for phase_config in self.config.get("phases", {}).values():
+            configured_states = phase_config.get("states", []) if isinstance(phase_config, dict) else []
+            if not isinstance(configured_states, list):
+                continue
+            for state in configured_states:
+                if not isinstance(state, str) or not state.strip():
+                    continue
+                normalized = state.strip().casefold()
+                if normalized not in seen:
+                    states.append(state.strip())
+                    seen.add(normalized)
+        return states
+
+    def _phase_for_issue_state(self, issue_state: object) -> Optional[str]:
+        """Resolve a normalized Jira state to the first matching workflow phase."""
+        if not isinstance(issue_state, str) or not issue_state.strip():
+            return None
+
+        normalized_issue_state = issue_state.strip().casefold()
+        for phase_name, phase_config in self.config.get("phases", {}).items():
+            configured_states = phase_config.get("states", []) if isinstance(phase_config, dict) else []
+            if not isinstance(configured_states, list):
+                continue
+            if any(
+                isinstance(state, str) and state.strip().casefold() == normalized_issue_state
+                for state in configured_states
+            ):
+                return phase_name
+        return None
 
     def add_error(self, message: str):
         """Adds an error to the orchestrator state with a timestamp."""
@@ -101,8 +150,7 @@ class SymphonyOrchestrator:
     def _reconcile_running_tasks(self):
         """Monitors running agent processes and handles completions or failures."""
         completed_ids = []
-        to_dispatch_next = [] # List of (issue_id, next_phase)
-        
+
         for issue_id, task in self.state.running.items():
             metadata = task["metadata"]
             workspace_path = task["workspace_path"]
@@ -149,42 +197,27 @@ class SymphonyOrchestrator:
                         logger.error(error_msg)
                         continue
 
-                    next_phase = self._get_next_phase(metadata.current_phase)
-                    if next_phase:
-                        to_dispatch_next.append((issue, workspace_path, next_phase))
-                    else:
-                        self.state.completed.add(issue_id)
-        
+
         for issue_id in completed_ids:
             del self.state.running[issue_id]
-            
-        for issue, workspace_path, next_phase in to_dispatch_next:
-            self._dispatch_phase(issue, workspace_path, next_phase)
 
-    def _get_next_phase(self, current_phase: str):
-        phases = list(self.config.get("phases", {}).keys())
-        try:
-            current_index = phases.index(current_phase)
-            if current_index + 1 < len(phases):
-                return phases[current_index + 1]
-        except ValueError:
-            pass
-        return None
-
-    def _dispatch_phase(self, issue: dict, workspace_path: str, phase_name: str):
+    def _dispatch_phase(self, issue: dict, workspace_path: str, phase_name: str) -> bool:
         issue_id = issue["id"]
         identifier = issue.get("identifier")
         
         phase_config = self.config.get("phases", {}).get(phase_name)
         if not phase_config:
             logger.error(f"Phase {phase_name} not found in config")
-            return
+            return False
 
         agent_name = phase_config.get("agent")
         agent_config = self.agents_config.agents.get(agent_name)
         if not agent_config:
             logger.error(f"Agent {agent_name} not found in agents.yaml")
-            return
+            return False
+
+        if not self._transition_on_phase_start(issue, phase_name):
+            return False
 
         logger.info(f"Dispatching phase {phase_name} for {identifier} using agent {agent_name}")
         execution = self.execution_controller.start_execution(
@@ -202,11 +235,16 @@ class SymphonyOrchestrator:
             metadata = TicketMetadata(
                 identifier=identifier,
                 title=issue.get("title", "Untitled"),
-                started_at=time.time()
+                started_at=time.time(),
+                workspace_path=workspace_path,
             )
             self.state.claimed[issue_id] = metadata
+
+        if not metadata.workspace_path:
+            metadata.workspace_path = workspace_path
             
         metadata.current_phase = phase_name
+        self.state.blocked.pop(issue_id, None)
         
         self.state.running[issue_id] = {
             "execution": execution,
@@ -214,22 +252,21 @@ class SymphonyOrchestrator:
             "workspace_path": workspace_path,
             "issue": issue
         }
+        return True
 
-    def _dispatch(self, issue: dict):
+    def _dispatch(self, issue: dict, phase_name: str):
         identifier = issue.get("identifier")
-        workspace_path = self.bitbucket.prepare_workspace(identifier)
+        metadata = self.state.claimed.get(issue["id"])
+        workspace_path = metadata.workspace_path if metadata and metadata.workspace_path else None
+        if not workspace_path:
+            workspace_path = self.bitbucket.prepare_workspace(identifier)
 
         try:
             self.issue_writer(workspace_path, issue)
         except Exception as e:
             logger.error(f"Failed to create issue.json: {e}")
 
-        # Start with the first phase
-        phases = list(self.config.get("phases", {}).keys())
-        if phases:
-            self._dispatch_phase(issue, workspace_path, phases[0])
-        else:
-            logger.error("No phases defined in WORKFLOW.md")
+        self._dispatch_phase(issue, workspace_path, phase_name)
 
     def _write_issue_json(self, workspace_path: str, issue: dict):
         issue_json_path = f"{workspace_path}/issue.json"
@@ -245,7 +282,7 @@ class SymphonyOrchestrator:
         message: str = "",
         needed_clarifications: Optional[list[str]] = None,
     ):
-        state_name = self._structured_target_state_for_phase(phase_name, status)
+        state_name = self._target_state_for_phase_transition(phase_name, status)
         if not state_name:
             return
 
@@ -269,14 +306,55 @@ class SymphonyOrchestrator:
                 f"Failed Jira transition for {issue_key} on structured status '{status}' in phase {phase_name}: {e}"
             )
 
-    def _structured_target_state_for_phase(self, phase_name: str, status: str) -> Optional[str]:
+    def _transition_on_phase_start(self, issue: dict, phase_name: str) -> bool:
+        state_name = self._target_state_for_phase_transition(phase_name, "on_start")
+        if not state_name:
+            return True
+
+        issue_key = issue.get("identifier")
+        if not issue_key:
+            error_msg = f"Cannot apply on_start transition for issue without identifier in phase {phase_name}"
+            self.add_error(error_msg)
+            logger.error(error_msg)
+            return False
+
+        try:
+            transitioned = self.jira.transition_issue(
+                issue_key=issue_key,
+                target_status_name=state_name,
+            )
+        except Exception as e:
+            error_msg = (
+                f"Failed Jira on_start transition for {issue_key} in phase "
+                f"{phase_name} to '{state_name}': {e}"
+            )
+            self.add_error(error_msg)
+            logger.error(error_msg)
+            return False
+
+        if not transitioned:
+            error_msg = (
+                f"Failed Jira on_start transition for {issue_key} in phase "
+                f"{phase_name} to '{state_name}'"
+            )
+            self.add_error(error_msg)
+            logger.error(error_msg)
+            return False
+
+        return True
+
+    def _target_state_for_phase_transition(self, phase_name: str, transition: str) -> Optional[str]:
         phase_config = self.config.get("phases", {}).get(phase_name, {})
         transitions_cfg = phase_config.get("transitions")
         if not isinstance(transitions_cfg, dict):
             return None
 
-        target = transitions_cfg.get(status)
-        return target if isinstance(target, str) and target.strip() else None
+        target = transitions_cfg.get(transition)
+        return target.strip() if isinstance(target, str) and target.strip() else None
+
+    def _structured_target_state_for_phase(self, phase_name: str, status: str) -> Optional[str]:
+        """Compatibility wrapper for phase completion transition lookup."""
+        return self._target_state_for_phase_transition(phase_name, status)
 
     def _agent_name_for_phase(self, phase_name: str) -> str:
         phase_config = self.config.get("phases", {}).get(phase_name, {})

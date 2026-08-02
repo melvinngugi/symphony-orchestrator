@@ -6,8 +6,6 @@ agent:
   max_concurrent_agents: 1
 
 tracker:
-  active_states:
-    - "To Do"
   terminal_states:
     - "Done"
   required_labels:
@@ -16,16 +14,22 @@ tracker:
 phases:
   plan:
     agent: planner
+    states:
+      - "To Do"
     transitions:
-      success: "In Progress"
+      success: "In Review"
       blocked: "Clarification Needed"
   implement:
     agent: implementer
+    states:
+      - "In Progress"
     transitions:
-      success: "In Progress"
+      success: "In Review"
       blocked: "Clarification Needed"
   validate:
     agent: tester
+    states:
+      - "In Review"
     transitions:
       success: "Done"
       blocked: "Clarification Needed"

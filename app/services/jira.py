@@ -40,7 +40,7 @@ class JiraClient:
         }
 
     def fetch_candidate_issues(self, active_states: List[str]) -> List[Dict[str, Any]]:
-        """Spec 11.1.1: Return issues in configured active states using the modern /jql endpoint"""
+        """Return issues in the phase-configured states using the modern /jql endpoint."""
         # Escape statuses with single quotes
         states_jql = ", ".join([f"'{state}'" for state in active_states])
         jql = f"project = '{settings.JIRA_PROJECT_KEY}' AND status IN ({states_jql}) ORDER BY priority ASC, created ASC"
