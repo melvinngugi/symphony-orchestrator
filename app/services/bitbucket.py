@@ -5,6 +5,7 @@ import urllib.parse
 import requests
 from requests.auth import HTTPBasicAuth
 from app.core.config import settings
+from app.models.workspace import repository_path
 
 logger = logging.getLogger("symphony.bitbucket")
 
@@ -34,8 +35,8 @@ class BitbucketService:
 
     def prepare_workspace(self, identifier: str) -> str:
         """
-        Prepares an isolated workspace directory, clones the Bitbucket repository 
-        using a scoped API token, and checks out a dedicated feature branch.
+        Prepares an issue workspace, clones the repository into its repository/
+        child, and checks out a dedicated feature branch.
         """
         workspace_path = os.path.join(self.base_workdir, identifier)
         
@@ -43,20 +44,23 @@ class BitbucketService:
         if os.path.exists(workspace_path):
             subprocess.run(["rm", "-rf", workspace_path], check=True)
 
+        os.makedirs(workspace_path, exist_ok=True)
+        checkout_path = repository_path(workspace_path)
+
         # Safely URL-encode the scoped API Token
         safe_token = urllib.parse.quote(settings.BITBUCKET_API_TOKEN)
 
         # Bitbucket's standard static username for API token authentication in Git commands
         repo_url = f"https://x-bitbucket-api-token-auth:{safe_token}@bitbucket.org/{self.workspace}/{self.repo_slug}.git"
 
-        logger.info(f"Cloning {self.repo_slug} into isolated workspace: {workspace_path}")
+        logger.info(f"Cloning {self.repo_slug} into isolated checkout: {checkout_path}")
         
         # Clone the repository
-        subprocess.run(["git", "clone", repo_url, workspace_path], check=True)
+        subprocess.run(["git", "clone", repo_url, checkout_path], check=True)
 
         # Create and checkout a dedicated feature branch for the Jira ticket
         branch_name = f"feature/{identifier.lower()}"
-        subprocess.run(["git", "checkout", "-b", branch_name], cwd=workspace_path, check=True)
+        subprocess.run(["git", "checkout", "-b", branch_name], cwd=checkout_path, check=True)
         
         logger.info(f"Successfully checked out branch {branch_name} for {identifier}")
         return workspace_path

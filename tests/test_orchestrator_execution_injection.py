@@ -48,9 +48,11 @@ class FakeExecutionController:
     def __init__(self, events=None):
         self.events = events
         self.starts = []
+        self.requests = []
         self.completions = {}
 
     def start_execution(self, request):
+        self.requests.append(request)
         if self.events is not None:
             self.events.append(("start", request.issue["identifier"], request.agent_name))
         phase_name = _phase_name_from_stdin(request.agent_config.stdin)
@@ -132,6 +134,8 @@ def test_dispatch_phase_uses_injected_execution_controller():
     assert fake_executor.starts == [("ISSUE-1", "plan", "planner")]
     assert "ISSUE-1" in orchestrator.state.running
     assert orchestrator.state.running["ISSUE-1"]["execution"].phase_name == "plan"
+    assert fake_executor.requests[0].workspace_path == "/fake/workspace"
+    assert fake_executor.requests[0].repository_path == "/fake/workspace/repository"
 
 
 def test_dispatch_phase_applies_on_start_transition_before_launching_agent():

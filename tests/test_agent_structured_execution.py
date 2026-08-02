@@ -4,13 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.agent import SubprocessAgentExecutionController
+from app.models.agent_config import AgentConfig
+from app.services.agent import AgentExecutionRequest, SubprocessAgentExecutionController
 
 
 def _execution(workspace_path: str, structured_output_file: str | None):
     return SimpleNamespace(
         agent_name="planner",
         workspace_path=workspace_path,
+        repository_path=f"{workspace_path}/repository",
         output_file="plan.md",
         structured_output_file=structured_output_file,
     )
@@ -106,3 +108,87 @@ def test_handle_success_output_non_structured_reports_output_file(tmp_path):
     assert clarifications == []
     assert files == ["plan.md"]
     assert (tmp_path / "plan.md").read_text() == "generated plan"
+
+
+def test_handle_success_output_writes_nested_non_structured_output(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    execution = _execution(str(tmp_path), None)
+    execution.output_file = "artifacts/report.md"
+
+    controller._handle_success_output(execution, "generated report")
+
+    assert (tmp_path / "artifacts" / "report.md").read_text() == "generated report"
+
+
+def test_handle_success_output_rejects_non_structured_path_escape(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    execution = _execution(str(tmp_path), None)
+    execution.output_file = "../report.md"
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        controller._handle_success_output(execution, "generated report")
+
+
+def test_load_stdin_rejects_path_escape(tmp_path):
+    controller = SubprocessAgentExecutionController()
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        controller._load_stdin_content(str(tmp_path), "../issue.json")
+
+
+def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-1"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    (workspace_path / "issue.json").write_text("issue body")
+    popen_calls = []
+
+    class CapturingStdin:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, content):
+            self.value += content
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = CapturingStdin()
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        popen_calls.append((command, kwargs, process))
+        return process
+
+    monkeypatch.setattr("app.services.agent.subprocess.Popen", fake_popen)
+    controller = SubprocessAgentExecutionController()
+    config = AgentConfig(
+        command="fake-agent",
+        args=["--result", "{structured}"],
+        stdin="issue.json",
+        structured="result.json",
+        sandbox="workspace-write",
+        env=[],
+    )
+
+    execution = controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="planner",
+            issue={"id": "1"},
+            agent_config=config,
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    command, kwargs, process = popen_calls[0]
+    assert command == ["fake-agent", "--result", str(workspace_path / "result.json")]
+    assert kwargs["cwd"] == str(repository_path)
+    assert process.stdin.value == "issue body"
+    assert execution.workspace_path == str(workspace_path)
+    assert execution.repository_path == str(repository_path)
+    assert (workspace_path / "log" / "planner.log").is_file()
+    assert not (repository_path / "issue.json").exists()
+    assert not (repository_path / "log").exists()

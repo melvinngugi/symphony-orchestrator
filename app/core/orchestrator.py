@@ -6,6 +6,7 @@ from typing import Callable, Optional
 
 from app.models.agent_config import AgentsRegistry
 from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail, BlockedTicketDetail
+from app.models.workspace import repository_path
 from app.services.agent import (
     AgentExecutionController,
     AgentExecutionRequest,
@@ -226,6 +227,7 @@ class SymphonyOrchestrator:
                 issue=issue,
                 agent_config=agent_config,
                 workspace_path=workspace_path,
+                repository_path=repository_path(workspace_path),
             )
         )
         

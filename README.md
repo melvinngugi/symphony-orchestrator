@@ -14,6 +14,25 @@ By using intelligent, multi-stage agents, Symphony parses repository execution c
 - **Core Domain Normalization**: Converts raw external vendor payloads (Jira/Bitbucket) into a unified, stable internal domain model.
 - **Structured Agent Routing**: Agents can emit structured JSON results that drive workflow routing, artifact extraction, and blocked-queue handling.
 
+## Workspace Layout
+
+Each Jira issue gets an issue-level workspace for Symphony execution artifacts and
+a nested Git checkout containing only repository files and task changes:
+
+```text
+/tmp/symphony_workspaces/ISSUE-123/
+├── issue.json
+├── plan.md
+├── implementer-result.json
+├── log/
+└── repository/
+```
+
+Agent processes run with `repository/` as their working directory. Agent stdin,
+structured results, extracted output files, ordinary output files, and logs are
+read from or written to the parent issue workspace, preventing Symphony execution
+files from polluting the Git checkout.
+
 ## Structured Agent Output
 
 An agent definition in `agents.yaml` may include a `structured` property with a non-empty filename (for example `structured: "planner-result.json"`).
