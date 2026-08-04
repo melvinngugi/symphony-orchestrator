@@ -98,6 +98,25 @@ Start the FastAPI application and background orchestrator daemon:
 
 The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the AI label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.
 
+## Codex Usage Dashboard
+
+The dashboard reads Codex usage limits from the supported local `codex app-server` interface. It uses the ChatGPT account already authenticated on the host and does not read or expose the account's OAuth credentials.
+
+Confirm the host login before starting Symphony:
+
+```bash
+codex login status
+```
+
+The dashboard polls usage once per minute by default and displays each rate-limit window returned by OpenAI, including its used percentage and reset time. A previously successful snapshot is marked stale when it is more than three minutes old. These intervals can be configured with:
+
+```bash
+CODEX_USAGE_POLL_SECONDS=60
+CODEX_USAGE_STALE_SECONDS=180
+```
+
+The `codex` executable must be available on `PATH`, and the Symphony process must use the same writable `CODEX_HOME` as the workflow agents. For a container deployment, provide the Codex CLI and mount the authenticated Codex home into the container; otherwise the dashboard safely reports usage as unavailable.
+
 ## Podman (Using uv)
 
 Build the image:

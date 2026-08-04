@@ -57,6 +57,78 @@
             color: #aaa;
             margin-right: 0.5rem;
         }
+
+        .usage-heading {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .usage-heading h2 {
+            margin-bottom: 0.35rem;
+        }
+
+        .usage-meta,
+        .usage-reset {
+            color: #aaa;
+            font-size: 0.85rem;
+        }
+
+        .usage-window {
+            margin-top: 1rem;
+        }
+
+        .usage-label {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 0.35rem;
+        }
+
+        .usage-track {
+            height: 0.75rem;
+            overflow: hidden;
+            background: #444;
+            border-radius: 999px;
+        }
+
+        .usage-bar {
+            height: 100%;
+            border-radius: inherit;
+            transition: width 0.3s ease;
+        }
+
+        .usage-bar.healthy {
+            background: #66bb6a;
+        }
+
+        .usage-bar.warning {
+            background: #ffb74d;
+        }
+
+        .usage-bar.danger {
+            background: #ff5252;
+        }
+
+        .usage-status {
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            background: #424242;
+            color: #ddd;
+            font-size: 0.8rem;
+            text-transform: capitalize;
+        }
+
+        .usage-status.available {
+            background: #285c2b;
+            color: #c8e6c9;
+        }
+
+        .usage-status.stale {
+            background: #6d4c1d;
+            color: #ffe0b2;
+        }
     </style>
 </head>
 
@@ -67,6 +139,43 @@
         <p>Currently running agents: {{ active_count }}</p>
         <p>Total issues claimed: {{ claimed_count }}</p>
         <p>Blocked tickets: {{ blocked_count }}</p>
+    </div>
+
+    <div class="card">
+        <div class="usage-heading">
+            <h2>Codex Usage{% if usage.plan_type %} · {{ usage.plan_type | title }}{% endif %}</h2>
+            <span class="usage-status {{ usage.status }}">{{ usage.status }}</span>
+        </div>
+
+        {% if usage.status in ['available', 'stale'] %}
+            {% if usage.windows %}
+                {% for window in usage.windows %}
+                <div class="usage-window">
+                    <div class="usage-label">
+                        <span>{{ window.label }}</span>
+                        <strong>{{ "%.0f" | format(window.used_percent) }}% used</strong>
+                    </div>
+                    <div class="usage-track" role="progressbar" aria-label="{{ window.label }} usage"
+                        aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ window.bar_percent }}">
+                        <div class="usage-bar {{ window.severity }}" style="width: {{ window.bar_percent }}%;"></div>
+                    </div>
+                    <div class="usage-reset">Resets {{ window.resets_at_display }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No active rate-limit windows were returned for this account.</p>
+            {% endif %}
+
+            {% if usage.rate_limit_reached_type %}
+                <p style="color: #ff8a80;">Limit reached: {{ usage.rate_limit_reached_type }}</p>
+            {% endif %}
+            {% if usage.reset_credits_available is not none %}
+                <p>Available full resets: {{ usage.reset_credits_available }}</p>
+            {% endif %}
+            <div class="usage-meta">Last updated: {{ usage.updated_at_display }}</div>
+        {% else %}
+            <p>Usage data is not available yet. Confirm that this host is signed in through Codex.</p>
+        {% endif %}
     </div>
 
     <div class="card">
