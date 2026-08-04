@@ -16,18 +16,26 @@ phases:
     agent: planner
     states:
       - "To Do"
+      - "Planning"
     transitions:
-      success: "In Review"
+      on_start: "In Planning"
+      success: 
+        do:
+          - action: "jira:attach_outputs"
+        next: "Review Plan"
       blocked: "Clarification Needed"
   implement:
     agent: implementer
     states:
       - "In Progress"
     transitions:
-      success: "In Review"
+      success: 
+        next: "In Review"
+        do:
+          - action: "bitbucket:create-pull-request"
       blocked: "Clarification Needed"
-  validate:
-    agent: tester
+  review:
+    agent: reviewer
     states:
       - "In Review"
     transitions:

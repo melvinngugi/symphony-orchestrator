@@ -5,16 +5,26 @@ import json
 from typing import Callable, Optional
 
 from app.models.agent_config import AgentsRegistry
-from app.models.state import OrchestratorState, TicketMetadata, ErrorDetail, BlockedTicketDetail
+from app.models.state import (
+    OrchestratorState,
+    TicketMetadata,
+    ErrorDetail,
+    BlockedTicketDetail,
+    PendingTransitionDetail,
+)
 from app.models.workspace import repository_path
 from app.services.agent import (
     AgentExecutionController,
     AgentExecutionRequest,
     SubprocessAgentExecutionController,
 )
-from app.services.jira import JiraClient
 from app.services.bitbucket import BitbucketService
+from app.services.actions import ActionResolver, PhaseResult
+from app.services.tracker import TrackerAdapter
 from app.core.config import load_agents_config
+from app.core.workflow_validation import (
+    validate_workflow_config,
+)
 
 logger = logging.getLogger("symphony.orchestrator")
 
@@ -23,10 +33,11 @@ class SymphonyOrchestrator:
         self,
         config: dict,
         *,
+        tracker: TrackerAdapter,
+        bitbucket_service: BitbucketService,
+        action_registry: ActionResolver,
         agents_registry: Optional[AgentsRegistry] = None,
         execution_controller: Optional[AgentExecutionController] = None,
-        jira_client: Optional[JiraClient] = None,
-        bitbucket_service: Optional[BitbucketService] = None,
         issue_writer: Optional[Callable[[str, dict], None]] = None,
     ):
         self.config = config
@@ -34,10 +45,16 @@ class SymphonyOrchestrator:
         self.state = OrchestratorState()
         
         # Instantiate existing services
-        self.jira = jira_client or JiraClient()
-        self.bitbucket = bitbucket_service or BitbucketService()
+        self.tracker = tracker
+        self.bitbucket = bitbucket_service
         self.execution_controller = execution_controller or SubprocessAgentExecutionController()
         self.issue_writer = issue_writer or self._write_issue_json
+        self.action_registry = action_registry
+        self.completion_transitions = validate_workflow_config(
+            self.config,
+            self.action_registry,
+        )
+        self.tracker.validate_workflow_states(self.config)
 
         # Apply config overrides
         if "polling" in self.config:
@@ -49,6 +66,7 @@ class SymphonyOrchestrator:
         logger.info("Starting Symphony Orchestrator daemon...")
         while True:
             try:
+                self._reconcile_pending_transitions()
                 self._reconcile_running_tasks()
                 self._tick()
             except Exception as e:
@@ -57,17 +75,17 @@ class SymphonyOrchestrator:
             time.sleep(self.state.poll_interval_ms / 1000.0)
 
     def _tick(self):
-        """Polls Jira and dispatches each issue to the phase matching its state."""
+        """Poll the tracker and dispatch each issue to the phase matching its state."""
         tracker_config = self.config.get("tracker", {})
         required_labels = tracker_config.get("required_labels", [])
 
         active_states = self._configured_phase_states()
         if not active_states:
-            logger.error("No Jira states defined under phases.*.states in WORKFLOW.md")
+            logger.error("No tracker states defined under phases.*.states in WORKFLOW.md")
             return
 
-        # 1. Fetch candidates from tracker (Jira)
-        candidates = self.jira.fetch_candidate_issues(active_states)
+        # 1. Fetch candidates from the configured tracker.
+        candidates = self.tracker.fetch_candidate_issues(active_states)
         
         for issue in candidates:
             # Respect concurrency limits
@@ -77,7 +95,11 @@ class SymphonyOrchestrator:
             issue_id = issue["id"]
             
             # Skip if already being processed OR completed
-            if issue_id in self.state.running or issue_id in self.state.completed:
+            if (
+                issue_id in self.state.running
+                or issue_id in self.state.completed
+                or issue_id in self.state.pending_transitions
+            ):
                 continue
             
             # Check labels
@@ -91,20 +113,20 @@ class SymphonyOrchestrator:
             if not phase_name:
                 continue
 
-            # Do not execute the same phase repeatedly while Jira still reports
+            # Do not execute the same phase repeatedly while the tracker still reports
             # the state that triggered the completed execution.
             metadata = self.state.claimed.get(issue_id)
             if metadata and metadata.current_phase == phase_name:
                 continue
 
             logger.info(
-                f"Claiming issue {issue.get('identifier')} in Jira state "
+                f"Claiming issue {issue.get('identifier')} in tracker state "
                 f"{issue.get('state')} for phase {phase_name}"
             )
             self._dispatch(issue, phase_name)
 
     def _configured_phase_states(self) -> list[str]:
-        """Return the unique Jira states configured by phases, in workflow order."""
+        """Return the unique tracker states configured by phases, in workflow order."""
         states: list[str] = []
         seen: set[str] = set()
         for phase_config in self.config.get("phases", {}).values():
@@ -121,7 +143,7 @@ class SymphonyOrchestrator:
         return states
 
     def _phase_for_issue_state(self, issue_state: object) -> Optional[str]:
-        """Resolve a normalized Jira state to the first matching workflow phase."""
+        """Resolve a normalized tracker state to the first matching workflow phase."""
         if not isinstance(issue_state, str) or not issue_state.strip():
             return None
 
@@ -170,14 +192,6 @@ class SymphonyOrchestrator:
                     logger.error(error_msg)
                 else:
                     logger.info(f"Agent completed phase {metadata.current_phase} for {metadata.identifier}: result={result.status}")
-                    self._transition_for_phase_status(
-                        issue,
-                        metadata.current_phase,
-                        result.status,
-                        result.message,
-                        result.needed_clarifications or [],
-                    )
-
                     if result.status == "blocked":
                         self.state.blocked[issue_id] = BlockedTicketDetail(
                             identifier=metadata.identifier,
@@ -187,9 +201,7 @@ class SymphonyOrchestrator:
                             message=result.message or "Blocked by agent result",
                             needed_clarifications=result.needed_clarifications or [],
                         )
-                        continue
-
-                    if result.status != "success":
+                    elif result.status != "success":
                         error_msg = (
                             f"Unsupported agent status for {metadata.identifier} in phase "
                             f"{metadata.current_phase}: {result.status}"
@@ -197,6 +209,20 @@ class SymphonyOrchestrator:
                         self.add_error(error_msg)
                         logger.error(error_msg)
                         continue
+
+                    agent_name = self._agent_name_for_phase(metadata.current_phase)
+                    agent_config = self.agents_config.agents[agent_name]
+                    self._transition_for_phase_status(
+                        PhaseResult(
+                            issue=issue,
+                            workspace_path=workspace_path,
+                            repository_path=repository_path(workspace_path),
+                            phase_name=metadata.current_phase,
+                            agent_name=agent_name,
+                            agent_config=agent_config,
+                            execution=result,
+                        )
+                    )
 
 
         for issue_id in completed_ids:
@@ -276,37 +302,96 @@ class SymphonyOrchestrator:
             json.dump(issue, f, indent=2)
         logger.info(f"Created issue.json at {issue_json_path}")
 
-    def _transition_for_phase_status(
-        self,
-        issue: dict,
-        phase_name: str,
-        status: str,
-        message: str = "",
-        needed_clarifications: Optional[list[str]] = None,
-    ):
-        state_name = self._target_state_for_phase_transition(phase_name, status)
-        if not state_name:
+    def _transition_for_phase_status(self, phase_result: PhaseResult):
+        transition = self.completion_transitions.get(
+            (phase_result.phase_name, phase_result.execution.status)
+        )
+        if transition is None:
             return
 
-        issue_key = issue.get("identifier")
-        if not issue_key:
-            logger.warning(f"Skipping structured transition for issue without identifier in phase {phase_name}")
+        issue_id = phase_result.issue.get("id")
+        issue_key = phase_result.issue.get("identifier")
+        if not issue_id or not issue_key:
+            error_msg = (
+                "Cannot complete transition for issue without id or identifier in phase "
+                f"{phase_result.phase_name}"
+            )
+            self.add_error(error_msg)
+            logger.error(error_msg)
             return
 
-        agent_name = self._agent_name_for_phase(phase_name)
-        comment_body = self._build_agent_comment(agent_name, message, needed_clarifications or [])
-        if comment_body:
+        self.state.pending_transitions[issue_id] = PendingTransitionDetail(
+            phase_result=phase_result,
+            target_state=transition.next_state,
+            actions=list(transition.actions),
+        )
+        self._reconcile_pending_transition(issue_id)
+
+    def _reconcile_pending_transitions(self) -> None:
+        for issue_id in list(self.state.pending_transitions):
+            self._reconcile_pending_transition(issue_id)
+
+    def _reconcile_pending_transition(self, issue_id: str) -> None:
+        pending = self.state.pending_transitions.get(issue_id)
+        if pending is None:
+            return
+
+        phase_result = pending.phase_result
+        issue_key = phase_result.issue.get("identifier")
+        while pending.next_action_index < len(pending.actions):
+            action_name = pending.actions[pending.next_action_index]
             try:
-                self.jira.add_comment(issue_key=issue_key, body=comment_body)
+                action = self.action_registry.resolve(action_name)
+                action(phase_result)
             except Exception as e:
-                logger.error(f"Failed Jira comment for {issue_key} in phase {phase_name}: {e}")
+                error_msg = (
+                    f"Failed transition action '{action_name}' for {issue_key} in phase "
+                    f"{phase_result.phase_name}: {e}"
+                )
+                self.add_error(error_msg)
+                logger.error(error_msg)
+                return
+            pending.next_action_index += 1
+
+        if not pending.comment_attempted:
+            pending.comment_attempted = True
+            comment_body = self._build_agent_comment(
+                phase_result.agent_name,
+                phase_result.execution.message,
+                phase_result.execution.needed_clarifications or [],
+            )
+            if comment_body:
+                try:
+                    self.tracker.add_comment(issue_key, comment_body)
+                except Exception as e:
+                    logger.error(
+                        f"Failed tracker comment for {issue_key} in phase "
+                        f"{phase_result.phase_name}: {e}"
+                    )
 
         try:
-            self.jira.transition_issue(issue_key=issue_key, target_status_name=state_name)
+            transitioned = self.tracker.transition_issue(issue_key, pending.target_state)
         except Exception as e:
-            logger.error(
-                f"Failed Jira transition for {issue_key} on structured status '{status}' in phase {phase_name}: {e}"
+            error_msg = (
+                f"Failed tracker transition for {issue_key} on status "
+                f"'{phase_result.execution.status}' in phase "
+                f"{phase_result.phase_name}: {e}"
             )
+            self.add_error(error_msg)
+            logger.error(error_msg)
+            return
+
+        if not transitioned:
+            error_msg = (
+                f"Failed tracker transition for {issue_key} on status "
+                f"'{phase_result.execution.status}' in phase "
+                f"{phase_result.phase_name} to '{pending.target_state}'"
+            )
+            self.add_error(error_msg)
+            logger.error(error_msg)
+            return
+
+        del self.state.pending_transitions[issue_id]
 
     def _transition_on_phase_start(self, issue: dict, phase_name: str) -> bool:
         state_name = self._target_state_for_phase_transition(phase_name, "on_start")
@@ -321,13 +406,10 @@ class SymphonyOrchestrator:
             return False
 
         try:
-            transitioned = self.jira.transition_issue(
-                issue_key=issue_key,
-                target_status_name=state_name,
-            )
+            transitioned = self.tracker.transition_issue(issue_key, state_name)
         except Exception as e:
             error_msg = (
-                f"Failed Jira on_start transition for {issue_key} in phase "
+                f"Failed tracker on_start transition for {issue_key} in phase "
                 f"{phase_name} to '{state_name}': {e}"
             )
             self.add_error(error_msg)
@@ -336,7 +418,7 @@ class SymphonyOrchestrator:
 
         if not transitioned:
             error_msg = (
-                f"Failed Jira on_start transition for {issue_key} in phase "
+                f"Failed tracker on_start transition for {issue_key} in phase "
                 f"{phase_name} to '{state_name}'"
             )
             self.add_error(error_msg)
@@ -346,6 +428,10 @@ class SymphonyOrchestrator:
         return True
 
     def _target_state_for_phase_transition(self, phase_name: str, transition: str) -> Optional[str]:
+        if transition in ("success", "blocked"):
+            completion = self.completion_transitions.get((phase_name, transition))
+            return completion.next_state if completion else None
+
         phase_config = self.config.get("phases", {}).get(phase_name, {})
         transitions_cfg = phase_config.get("transitions")
         if not isinstance(transitions_cfg, dict):

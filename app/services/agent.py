@@ -84,8 +84,9 @@ class SubprocessAgentExecutionController:
         )
         stderr_file.close()
 
-        if stdin_content and process.stdin:
-            process.stdin.write(stdin_content)
+        if process.stdin:
+            if stdin_content:
+                process.stdin.write(stdin_content)
             process.stdin.close()
 
         return RunningAgentExecution(
@@ -219,6 +220,7 @@ class SubprocessAgentExecutionController:
         if content_type == "text":
             with open(output_path, "w") as f:
                 f.write(content)
+            logger.info(f"Wrote agent output file to {output_path}")
             return
 
         try:
@@ -228,6 +230,7 @@ class SubprocessAgentExecutionController:
 
         with open(output_path, "wb") as f:
             f.write(binary_content)
+        logger.info(f"Wrote agent output file to {output_path}")
 
     def _resolve_workspace_path(self, workspace_path: str, relative_path: str) -> str:
         workspace_abs = os.path.abspath(workspace_path)
@@ -297,17 +300,16 @@ class SubprocessAgentExecutionController:
 
         stdin_file_path = self._resolve_workspace_path(workspace_path, stdin_file)
         if not os.path.exists(stdin_file_path):
-            logger.warning(f"Stdin file {stdin_file_path} not found")
-            return ""
+            raise FileNotFoundError(f"Agent stdin file not found: {stdin_file_path}")
 
         try:
             with open(stdin_file_path, "r") as f:
                 content = f.read()
             logger.info(f"Read stdin content from {stdin_file_path}")
             return content
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to read stdin file {stdin_file_path}: {e}")
-            return ""
+            raise
 
     def _read_stderr_content(self, workspace_path: str, agent_name: str) -> str:
         log_file_path = self._log_file_path(workspace_path, agent_name)

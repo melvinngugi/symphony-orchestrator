@@ -1,12 +1,37 @@
 from dataclasses import dataclass
+import inspect
 
+import pytest
+
+from app.core import orchestrator as orchestrator_module
 from app.core.orchestrator import SymphonyOrchestrator
+from app.core.workflow_validation import WorkflowValidationError
 from app.models.agent_config import AgentConfig, AgentsRegistry
 from app.services.agent import AgentExecutionResult
+from app.services.actions import ActionRegistry, PhaseResult
 
 
 class FakeJiraClient:
-    def __init__(self, issues=None, transition_result=True, transition_error=None, events=None):
+    DEFAULT_STATUS_NAMES = {
+        "To Do",
+        "Planning",
+        "In Progress",
+        "Reopened",
+        "In Review",
+        "Review",
+        "Blocked",
+        "Clarification Needed",
+        "Done",
+    }
+
+    def __init__(
+        self,
+        issues=None,
+        transition_result=True,
+        transition_error=None,
+        events=None,
+        validation_error=None,
+    ):
         self.issues = issues or []
         self.transition_result = transition_result
         self.transition_error = transition_error
@@ -14,27 +39,54 @@ class FakeJiraClient:
         self.requested_states = []
         self.comments = []
         self.transitions = []
+        self.validation_error = validation_error
+        self.validated_configs = []
+
+    def validate_workflow_states(self, config):
+        self.validated_configs.append(config)
+        if self.validation_error is not None:
+            raise self.validation_error
 
     def fetch_candidate_issues(self, active_states):
         self.requested_states.append(active_states)
         return self.issues
 
-    def transition_issue(self, issue_key: str, target_status_name: str) -> bool:
-        self.transitions.append((issue_key, target_status_name))
+    def transition_issue(self, issue_identifier: str, target_state: str) -> bool:
+        self.transitions.append((issue_identifier, target_state))
         if self.events is not None:
-            self.events.append(("transition", issue_key, target_status_name))
+            self.events.append(("transition", issue_identifier, target_state))
         if self.transition_error is not None:
             raise self.transition_error
         return self.transition_result
 
-    def add_comment(self, issue_key: str, body: str) -> bool:
-        self.comments.append((issue_key, body))
+    def add_comment(self, issue_identifier: str, body: str) -> bool:
+        self.comments.append((issue_identifier, body))
         return True
 
 
 class FakeBitbucketService:
     def prepare_workspace(self, _identifier):
         return "/fake/workspace"
+
+    def create_pull_request_for_phase(self, _phase_result):
+        return None
+
+    def register_actions(self, registry):
+        registry.register(
+            "bitbucket:create-pull-request",
+            self.create_pull_request_for_phase,
+        )
+
+
+class ReadOnlyActionResolver:
+    def __init__(self, actions=None):
+        self._actions = actions or {}
+
+    def contains(self, name):
+        return name in self._actions
+
+    def resolve(self, name):
+        return self._actions[name]
 
 
 @dataclass
@@ -85,7 +137,8 @@ def _build_orchestrator(
     issues=None,
     issue_writer=None,
     agents_registry=None,
-    jira_client=None,
+    tracker=None,
+    action_registry=None,
 ):
     agents_registry = agents_registry or AgentsRegistry(
         agents={
@@ -108,15 +161,78 @@ def _build_orchestrator(
         }
     )
 
+    bitbucket = FakeBitbucketService()
+    registry = action_registry or ActionRegistry()
+    if action_registry is None:
+        bitbucket.register_actions(registry)
+
     return SymphonyOrchestrator(
         workflow_config,
         agents_registry=agents_registry,
         execution_controller=fake_executor,
-        jira_client=jira_client or FakeJiraClient(issues=issues),
-        bitbucket_service=FakeBitbucketService(),
+        tracker=tracker or FakeJiraClient(issues=issues),
+        bitbucket_service=bitbucket,
         issue_writer=issue_writer or (lambda _workspace, _issue: None),
+        action_registry=registry,
     )
 
+
+def test_orchestrator_depends_on_tracker_abstraction_not_jira_client():
+    parameters = inspect.signature(SymphonyOrchestrator).parameters
+
+    assert "tracker" in parameters
+    assert "jira_client" not in parameters
+    assert "JiraClient" not in vars(orchestrator_module)
+    assert parameters["action_registry"].default is inspect.Parameter.empty
+    assert "ActionRegistry" not in vars(orchestrator_module)
+
+
+def test_orchestrator_uses_action_registry_through_read_only_resolver():
+    calls = []
+    resolver = ReadOnlyActionResolver(
+        {
+            "test:action": lambda phase_result: calls.append(
+                (phase_result.workspace_path, phase_result.issue["id"])
+            )
+        }
+    )
+    tracker = FakeJiraClient()
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {
+                    "success": {
+                        "next": "In Review",
+                        "do": [{"action": "test:action"}],
+                    }
+                },
+            }
+        }
+    }
+    orchestrator = _build_orchestrator(
+        FakeExecutionController(),
+        config,
+        tracker=tracker,
+        action_registry=resolver,
+    )
+    issue = {"id": "ISSUE-READ-ONLY", "identifier": "ISSUE-READ-ONLY"}
+
+    orchestrator._transition_for_phase_status(
+        PhaseResult(
+            issue=issue,
+            workspace_path="/issues/ISSUE-READ-ONLY",
+            repository_path="/issues/ISSUE-READ-ONLY/repository",
+            phase_name="plan",
+            agent_name="planner",
+            agent_config=orchestrator.agents_config.agents["planner"],
+            execution=AgentExecutionResult(exit_code=0, stdout="", stderr=""),
+        )
+    )
+
+    assert not hasattr(resolver, "register")
+    assert calls == [("/issues/ISSUE-READ-ONLY", "ISSUE-READ-ONLY")]
+    assert tracker.transitions == [("ISSUE-READ-ONLY", "In Review")]
 
 
 def test_dispatch_phase_uses_injected_execution_controller():
@@ -150,7 +266,7 @@ def test_dispatch_phase_applies_on_start_transition_before_launching_agent():
             },
         }
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
     issue = {"id": "ISSUE-START", "identifier": "ISSUE-START", "title": "Test"}
 
     dispatched = orchestrator._dispatch_phase(issue, "/fake/workspace", "plan")
@@ -163,32 +279,40 @@ def test_dispatch_phase_applies_on_start_transition_before_launching_agent():
     assert jira.comments == []
 
 
-def test_dispatch_phase_ignores_absent_or_invalid_on_start_transition():
-    transition_configs = [
-        {},
-        {"on_start": ""},
-        {"on_start": "   "},
-        {"on_start": 123},
-    ]
-
-    for index, transitions in enumerate(transition_configs):
-        fake_executor = FakeExecutionController()
-        jira = FakeJiraClient()
-        config = {
-            "phases": {
-                "plan": {
-                    "agent": "planner",
-                    "transitions": transitions,
-                },
-            }
+def test_dispatch_phase_ignores_absent_on_start_transition():
+    fake_executor = FakeExecutionController()
+    jira = FakeJiraClient()
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {},
+            },
         }
-        orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
-        issue_id = f"ISSUE-NO-START-{index}"
-        issue = {"id": issue_id, "identifier": issue_id, "title": "Test"}
+    }
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
+    issue = {"id": "ISSUE-NO-START", "identifier": "ISSUE-NO-START", "title": "Test"}
 
-        assert orchestrator._dispatch_phase(issue, "/fake/workspace", "plan") is True
-        assert jira.transitions == []
-        assert fake_executor.starts == [(issue_id, "plan", "planner")]
+    assert orchestrator._dispatch_phase(issue, "/fake/workspace", "plan") is True
+    assert jira.transitions == []
+    assert fake_executor.starts == [("ISSUE-NO-START", "plan", "planner")]
+
+
+@pytest.mark.parametrize("configured", ["", "   ", 123])
+def test_orchestrator_rejects_invalid_on_start_transition(configured):
+    jira = FakeJiraClient()
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {"on_start": configured},
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="phases.plan.transitions.on_start"):
+        _build_orchestrator(FakeExecutionController(), config, tracker=jira)
+    assert jira.validated_configs == []
 
 
 def test_dispatch_phase_does_not_launch_when_on_start_transition_returns_false():
@@ -202,7 +326,7 @@ def test_dispatch_phase_does_not_launch_when_on_start_transition_returns_false()
             },
         }
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
     issue = {"id": "ISSUE-FAILED-START", "identifier": "ISSUE-FAILED-START", "title": "Test"}
 
     dispatched = orchestrator._dispatch_phase(issue, "/fake/workspace", "plan")
@@ -211,7 +335,7 @@ def test_dispatch_phase_does_not_launch_when_on_start_transition_returns_false()
     assert fake_executor.starts == []
     assert "ISSUE-FAILED-START" not in orchestrator.state.running
     assert "ISSUE-FAILED-START" not in orchestrator.state.claimed
-    assert "Failed Jira on_start transition" in orchestrator.state.errors[0].message
+    assert "Failed tracker on_start transition" in orchestrator.state.errors[0].message
 
 
 def test_dispatch_phase_does_not_launch_when_on_start_transition_raises():
@@ -225,7 +349,7 @@ def test_dispatch_phase_does_not_launch_when_on_start_transition_raises():
             },
         }
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
     issue = {"id": "ISSUE-START-ERROR", "identifier": "ISSUE-START-ERROR", "title": "Test"}
 
     dispatched = orchestrator._dispatch_phase(issue, "/fake/workspace", "plan")
@@ -248,7 +372,7 @@ def test_dispatch_phase_does_not_launch_on_start_without_issue_identifier():
             },
         }
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
     issue = {"id": "ISSUE-NO-KEY", "title": "Test"}
 
     dispatched = orchestrator._dispatch_phase(issue, "/fake/workspace", "plan")
@@ -281,7 +405,7 @@ def test_tick_retries_issue_after_on_start_transition_failure():
             },
         },
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
 
     orchestrator._tick()
     jira.transition_result = True
@@ -308,7 +432,7 @@ def test_reconcile_waits_for_jira_state_before_dispatching_another_phase():
             "implement": {"agent": "implementer"},
         }
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
     issue = {"id": "ISSUE-2", "identifier": "ISSUE-2", "title": "Test"}
 
     orchestrator._dispatch_phase(issue, "/fake/workspace", "plan")
@@ -404,7 +528,7 @@ def test_reconcile_structured_success_extracts_outputs_and_waits_for_jira(tmp_pa
         fake_executor,
         config,
         agents_registry=agents_registry,
-        jira_client=jira,
+        tracker=jira,
     )
 
     issue = {"id": "ISSUE-10", "identifier": "ISSUE-10", "title": "Structured success"}
@@ -463,7 +587,7 @@ def test_tick_selects_phase_from_jira_state_and_keeps_label_filter():
             "implement": {"agent": "implementer", "states": ["In Progress", "Reopened"]},
         },
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
 
     orchestrator._tick()
 
@@ -488,7 +612,7 @@ def test_tick_dispatches_new_phase_after_jira_state_changes_without_recreating_w
             "implement": {"agent": "implementer", "states": ["In Progress"]},
         },
     }
-    orchestrator = _build_orchestrator(fake_executor, config, jira_client=jira)
+    orchestrator = _build_orchestrator(fake_executor, config, tracker=jira)
 
     orchestrator._tick()
     fake_executor.completions[("ISSUE-22", "plan")] = AgentExecutionResult(
@@ -547,7 +671,7 @@ def test_reconcile_structured_blocked_queues_and_stops(tmp_path):
         fake_executor,
         config,
         agents_registry=agents_registry,
-        jira_client=jira,
+        tracker=jira,
     )
 
     issue = {"id": "ISSUE-11", "identifier": "ISSUE-11", "title": "Structured blocked"}
@@ -630,3 +754,283 @@ def test_reconcile_executor_status_failure_records_error_and_halts(tmp_path):
     assert "ISSUE-12" not in orchestrator.state.blocked
     assert len(orchestrator.state.errors) == 1
     assert "Agent failure for ISSUE-12" in orchestrator.state.errors[0].message
+
+
+@pytest.mark.parametrize(
+    "configured, expected_message",
+    [
+        ({"do": []}, "exactly 'next' and 'do'"),
+        ({"next": "Review"}, "exactly 'next' and 'do'"),
+        ({"next": "Review", "do": [], "extra": True}, "exactly 'next' and 'do'"),
+        ({"next": "", "do": []}, ".next: must be a non-empty string"),
+        ({"next": "Review", "do": "action"}, ".do: must be a list"),
+        ({"next": "Review", "do": [{}]}, "must contain exactly 'action'"),
+        ({"next": "Review", "do": [{"action": ""}]}, ".action: must be a non-empty string"),
+        (123, "must be a non-empty string or an expanded transition"),
+    ],
+)
+def test_orchestrator_rejects_malformed_expanded_transitions(configured, expected_message):
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {"success": configured},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match=expected_message):
+        _build_orchestrator(FakeExecutionController(), config)
+
+
+def test_orchestrator_rejects_unknown_transition_action_before_querying_jira():
+    jira = FakeJiraClient()
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {
+                    "success": {
+                        "next": "Review",
+                        "do": [{"action": "unknown:action"}],
+                    }
+                },
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="unknown transition action 'unknown:action'"):
+        _build_orchestrator(FakeExecutionController(), config, tracker=jira)
+    assert jira.validated_configs == []
+
+
+def test_orchestrator_delegates_workflow_state_validation_to_tracker():
+    tracker = FakeJiraClient()
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "states": ["Tracker State"],
+                "transitions": {"success": "Tracker Target"},
+            }
+        }
+    }
+
+    _build_orchestrator(FakeExecutionController(), config, tracker=tracker)
+
+    assert tracker.validated_configs == [config]
+
+
+def test_orchestrator_propagates_tracker_workflow_validation_failure():
+    validation_error = WorkflowValidationError(
+        ["phases.plan.states[0]: unknown Jira state 'Missing'"]
+    )
+    tracker = FakeJiraClient(validation_error=validation_error)
+    config = {"phases": {"plan": {"agent": "planner", "states": ["To Do"]}}}
+
+    with pytest.raises(WorkflowValidationError) as exc_info:
+        _build_orchestrator(FakeExecutionController(), config, tracker=tracker)
+
+    assert exc_info.value is validation_error
+    assert tracker.validated_configs == [config]
+
+
+def test_expanded_transition_actions_retry_from_failed_action():
+    executor = FakeExecutionController()
+    jira = FakeJiraClient()
+    calls = []
+    flaky_attempts = 0
+
+    phase_results = []
+
+    def first(phase_result):
+        phase_results.append(phase_result)
+        calls.append(
+            ("first", phase_result.workspace_path, phase_result.issue["identifier"])
+        )
+
+    def flaky(phase_result):
+        nonlocal flaky_attempts
+        flaky_attempts += 1
+        phase_results.append(phase_result)
+        calls.append(
+            ("flaky", phase_result.workspace_path, phase_result.issue["identifier"])
+        )
+        if flaky_attempts == 1:
+            raise RuntimeError("temporary failure")
+
+    def last(phase_result):
+        phase_results.append(phase_result)
+        calls.append(
+            ("last", phase_result.workspace_path, phase_result.issue["identifier"])
+        )
+
+    registry = ActionRegistry([
+        ("test:first", first),
+        ("test:flaky", flaky),
+        ("test:last", last),
+    ])
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {
+                    "success": {
+                        "next": "In Review",
+                        "do": [
+                            {"action": "test:first"},
+                            {"action": "test:flaky"},
+                            {"action": "test:last"},
+                        ],
+                    }
+                },
+            }
+        }
+    }
+    orchestrator = _build_orchestrator(
+        executor,
+        config,
+        tracker=jira,
+        action_registry=registry,
+    )
+    issue = {"id": "ISSUE-ACTION", "identifier": "ISSUE-ACTION", "title": "Actions"}
+
+    orchestrator._dispatch_phase(issue, "/issues/ISSUE-ACTION", "plan")
+    executor.completions[("ISSUE-ACTION", "plan")] = AgentExecutionResult(
+        exit_code=0,
+        stdout="agent stdout",
+        stderr="agent stderr",
+        status="success",
+        message="done",
+        needed_clarifications=["retained detail"],
+        files=["plan.md"],
+    )
+    orchestrator._reconcile_running_tasks()
+
+    assert [call[0] for call in calls] == ["first", "flaky"]
+    assert all(call[1:] == ("/issues/ISSUE-ACTION", "ISSUE-ACTION") for call in calls)
+    assert jira.transitions == []
+    assert orchestrator.state.pending_transitions["ISSUE-ACTION"].next_action_index == 1
+    assert "ISSUE-ACTION" not in orchestrator.state.running
+
+    orchestrator._reconcile_pending_transitions()
+
+    assert [call[0] for call in calls] == ["first", "flaky", "flaky", "last"]
+    assert all(result is phase_results[0] for result in phase_results)
+    assert phase_results[0].phase_name == "plan"
+    assert phase_results[0].agent_name == "planner"
+    assert phase_results[0].agent_config is orchestrator.agents_config.agents["planner"]
+    assert phase_results[0].repository_path == "/issues/ISSUE-ACTION/repository"
+    assert phase_results[0].execution.message == "done"
+    assert phase_results[0].execution.stdout == "agent stdout"
+    assert phase_results[0].execution.stderr == "agent stderr"
+    assert phase_results[0].execution.needed_clarifications == ["retained detail"]
+    assert phase_results[0].execution.files == ["plan.md"]
+    assert jira.comments == [
+        ("ISSUE-ACTION", "[agent planner]: done\n\n- retained detail")
+    ]
+    assert jira.transitions == [("ISSUE-ACTION", "In Review")]
+    assert "ISSUE-ACTION" not in orchestrator.state.pending_transitions
+
+
+def test_jira_transition_retries_without_repeating_actions_or_comments():
+    executor = FakeExecutionController()
+    jira = FakeJiraClient(transition_result=False)
+    action_calls = []
+    registry = ActionRegistry(
+        [("test:action", lambda phase_result: action_calls.append(phase_result.issue["id"]))]
+    )
+    config = {
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "transitions": {
+                    "success": {
+                        "next": "In Review",
+                        "do": [{"action": "test:action"}],
+                    }
+                },
+            }
+        }
+    }
+    orchestrator = _build_orchestrator(
+        executor,
+        config,
+        tracker=jira,
+        action_registry=registry,
+    )
+    issue = {"id": "ISSUE-JIRA", "identifier": "ISSUE-JIRA", "title": "Jira retry"}
+
+    orchestrator._dispatch_phase(issue, "/issues/ISSUE-JIRA", "plan")
+    executor.completions[("ISSUE-JIRA", "plan")] = AgentExecutionResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        message="complete",
+    )
+    orchestrator._reconcile_running_tasks()
+    jira.transition_result = True
+    orchestrator._reconcile_pending_transitions()
+
+    assert action_calls == ["ISSUE-JIRA"]
+    assert jira.comments == [("ISSUE-JIRA", "[agent planner]: complete")]
+    assert jira.transitions == [
+        ("ISSUE-JIRA", "In Review"),
+        ("ISSUE-JIRA", "In Review"),
+    ]
+    assert "ISSUE-JIRA" not in orchestrator.state.pending_transitions
+
+
+def test_pending_blocked_transition_stays_visible_and_is_not_redispatched():
+    executor = FakeExecutionController()
+    issue = {
+        "id": "ISSUE-BLOCKED-ACTION",
+        "identifier": "ISSUE-BLOCKED-ACTION",
+        "title": "Blocked action",
+        "state": "To Do",
+        "labels": ["AI"],
+    }
+    jira = FakeJiraClient(issues=[issue])
+
+    def fail_action(_phase_result):
+        raise RuntimeError("still unavailable")
+
+    registry = ActionRegistry([("test:fail", fail_action)])
+    config = {
+        "tracker": {"required_labels": ["AI"]},
+        "phases": {
+            "plan": {
+                "agent": "planner",
+                "states": ["To Do"],
+                "transitions": {
+                    "blocked": {
+                        "next": "Clarification Needed",
+                        "do": [{"action": "test:fail"}],
+                    }
+                },
+            }
+        },
+    }
+    orchestrator = _build_orchestrator(
+        executor,
+        config,
+        tracker=jira,
+        action_registry=registry,
+    )
+
+    orchestrator._tick()
+    executor.completions[("ISSUE-BLOCKED-ACTION", "plan")] = AgentExecutionResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        status="blocked",
+        message="Need input",
+    )
+    orchestrator._reconcile_running_tasks()
+    orchestrator._tick()
+
+    assert "ISSUE-BLOCKED-ACTION" in orchestrator.state.blocked
+    assert "ISSUE-BLOCKED-ACTION" in orchestrator.state.pending_transitions
+    assert len(orchestrator.state.running) == 0
+    assert executor.starts == [("ISSUE-BLOCKED-ACTION", "plan", "planner")]
+    assert jira.transitions == []

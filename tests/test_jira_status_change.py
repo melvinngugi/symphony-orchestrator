@@ -22,7 +22,7 @@ def test_manual_ticket_transition():
     print(f"Initializing status transition test for ticket: {target_ticket}")
     
     # Invoke the function by passing the key and target status
-    success = client.transition_issue(issue_key=target_ticket, target_status_name=target_status)
+    success = client.transition_issue(issue_identifier=target_ticket, target_state=target_status)
     assert success is True
 
 if __name__ == "__main__":

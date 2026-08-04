@@ -60,7 +60,64 @@ phases:
 
 `transitions.on_start`, `transitions.success`, and `transitions.blocked` are optional. When `on_start` is configured, the Jira transition must succeed before the phase agent launches. A failed start transition records an orchestration error, does not launch the agent, and leaves the issue eligible for a later polling retry. No Jira comment is added for this transition. If an outcome transition is omitted, no Jira transition is attempted for that outcome.
 
+Completion transitions also support an expanded form with ordered application actions:
+
+```yaml
+phases:
+   implement:
+      agent: implementer
+      states:
+         - "In Progress"
+      transitions:
+         success:
+            next: "In Review"
+            do:
+               - action: "bitbucket:create-pull-request"
+```
+
+The existing string form remains supported when no actions are needed. Expanded
+transitions are valid for `success` and `blocked`; `on_start` remains a Jira-state
+string. Actions run in declaration order before the Jira comment and transition.
+If an action fails, the completion remains pending and retries from that action on
+the next poll. Completed actions are not repeated. A failed Jira transition is also
+retried without repeating actions or posting the agent comment again.
+
+The Bitbucket adapter's `bitbucket:create-pull-request` action stages and commits changes from
+the issue's nested `repository/` checkout, pushes its current branch, and creates a
+pull request to the Bitbucket default branch. An existing open pull request for the
+same source and destination branches is reused. The configured API token therefore
+needs repository write and pull-request permissions.
+
+Action-providing adapters register their handlers in the application-owned action
+registry during startup. The orchestrator receives that registry through a read-only
+resolver interface and never changes registrations. Action names must be unique;
+duplicate registrations fail startup. Every action receives one complete phase
+result containing its issue, workspace, phase and agent metadata, configuration,
+and normalized execution result.
+
+The Jira adapter's `jira:attach_outputs` action uploads every output reported by the
+completed phase from the issue workspace. Ordinary output filenames come from the
+agent's `output_file`; structured outputs retain the names declared by the agent.
+Files are sent together using Jira's attachment API before the comment and state
+transition. A phase without outputs is a successful no-op. Failed uploads retry with
+the pending action and may create duplicate same-name attachments if Jira processed
+an earlier request whose response was lost.
+
 Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
+
+## Startup Workflow Validation
+
+Before the orchestration thread starts, Symphony validates the workflow structure
+and registered action names, then delegates state-name validation to the configured
+tracker adapter. The Jira adapter requires phase `states`, `on_start`, and both
+simple and expanded completion targets to match a status available to at least one
+issue type in the configured Jira project. Matching is case-insensitive.
+
+Validation loads project statuses from Jira during every startup. Invalid workflow
+configuration, unavailable Jira credentials or connectivity, and malformed or empty
+status responses are fatal startup errors. State existence is validated; whether a
+specific Jira transition is reachable from a particular issue state remains a
+runtime concern.
 
 ## Tech Stack
 

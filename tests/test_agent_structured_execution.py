@@ -136,6 +136,65 @@ def test_load_stdin_rejects_path_escape(tmp_path):
         controller._load_stdin_content(str(tmp_path), "../issue.json")
 
 
+def test_load_stdin_fails_when_configured_file_is_missing(tmp_path):
+    controller = SubprocessAgentExecutionController()
+
+    with pytest.raises(FileNotFoundError, match="Agent stdin file not found"):
+        controller._load_stdin_content(str(tmp_path), "missing.json")
+
+
+def test_load_stdin_propagates_read_failure(monkeypatch, tmp_path):
+    controller = SubprocessAgentExecutionController()
+    stdin_path = tmp_path / "issue.json"
+    stdin_path.write_text("issue body")
+
+    def fail_open(*_args, **_kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("builtins.open", fail_open)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        controller._load_stdin_content(str(tmp_path), "issue.json")
+
+
+def test_load_stdin_allows_explicitly_empty_configuration(tmp_path):
+    controller = SubprocessAgentExecutionController()
+
+    assert controller._load_stdin_content(str(tmp_path), "") == ""
+
+
+def test_start_execution_does_not_spawn_when_stdin_is_missing(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-MISSING"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    popen_calls = []
+    monkeypatch.setattr(
+        "app.services.agent.subprocess.Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+    )
+    controller = SubprocessAgentExecutionController()
+    config = AgentConfig(
+        command="fake-agent",
+        args=[],
+        stdin="missing.json",
+        sandbox="workspace-write",
+        env=[],
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing.json"):
+        controller.start_execution(
+            AgentExecutionRequest(
+                agent_name="planner",
+                issue={"id": "1"},
+                agent_config=config,
+                workspace_path=str(workspace_path),
+                repository_path=str(repository_path),
+            )
+        )
+
+    assert popen_calls == []
+
+
 def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(monkeypatch, tmp_path):
     workspace_path = tmp_path / "ISSUE-1"
     repository_path = workspace_path / "repository"
