@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # App Settings
     PROJECT_NAME: str = "Symphony Jira-Bitbucket Orchestrator"
     SERVER_PORT: int = int(os.getenv("SERVER_PORT", 8000))
+    CODEX_USAGE_POLL_SECONDS: float = float(os.getenv("CODEX_USAGE_POLL_SECONDS", 60))
+    CODEX_USAGE_STALE_SECONDS: float = float(os.getenv("CODEX_USAGE_STALE_SECONDS", 180))
     
     # Jira Settings
     JIRA_HOST: str = os.getenv("JIRA_HOST", "")

@@ -8,8 +8,10 @@ from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
-from app.core.config import load_config
+from app.core.config import load_config, settings
 from app.core.orchestrator import SymphonyOrchestrator
+from app.models.usage import UsageSnapshot
+from app.services.usage import CodexUsageCollector
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -17,6 +19,7 @@ logger = logging.getLogger("symphony.main")
 
 # Global reference to orchestrator for the dashboard
 global_orchestrator = None
+global_usage_collector = None
 
 
 def ensure_symphony_home() -> None:
@@ -30,16 +33,24 @@ def ensure_symphony_home() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global global_orchestrator
+    global global_orchestrator, global_usage_collector
     ensure_symphony_home()
     config = load_config("WORKFLOW.md")
     global_orchestrator = SymphonyOrchestrator(config)
+    global_usage_collector = CodexUsageCollector(
+        poll_interval_seconds=settings.CODEX_USAGE_POLL_SECONDS,
+        stale_after_seconds=settings.CODEX_USAGE_STALE_SECONDS,
+    )
+    global_usage_collector.start()
 
     # Run the orchestrator loop in a separate thread so it doesn't block the dashboard API
     daemon_thread = threading.Thread(target=global_orchestrator.start, daemon=True)
     daemon_thread.start()
 
-    yield
+    try:
+        yield
+    finally:
+        global_usage_collector.stop()
 
 # Initialize App & Templates
 app = FastAPI(lifespan=lifespan)
@@ -54,6 +65,7 @@ async def dashboard(request: Request):
     claimed_count = 0
     blocked_tickets = []
     blocked_count = 0
+    usage = UsageSnapshot()
 
     if global_orchestrator:
         # running[issue_id] = {"handle": process, "metadata": TicketMetadata}
@@ -64,6 +76,9 @@ async def dashboard(request: Request):
         claimed_count = len(global_orchestrator.state.claimed)
         blocked_tickets = list(global_orchestrator.state.blocked.values())
         blocked_count = len(global_orchestrator.state.blocked)
+
+    if global_usage_collector:
+        usage = global_usage_collector.snapshot()
     
     return templates.TemplateResponse(
         request, 
@@ -75,7 +90,8 @@ async def dashboard(request: Request):
             "running_tickets": running_tickets,
             "blocked_tickets": blocked_tickets,
             "claimed_tickets": claimed_tickets,
-            "errors": errors
+            "errors": errors,
+            "usage": usage,
         }
     )
 
