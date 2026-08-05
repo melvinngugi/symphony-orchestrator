@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from app import main
-from app.core.workflow_validation import WorkflowValidationError
+from app.core.workflow_validation import (
+    WorkflowStateValidationError,
+    WorkflowValidationError,
+)
 
 
 def test_ensure_symphony_home_sets_default_when_unset(monkeypatch):
@@ -72,6 +75,59 @@ def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypat
 
     assert thread_calls == []
     assert "Workflow validation failed" in caplog.text
+
+
+def test_lifespan_logs_state_misconfiguration_without_traceback(monkeypatch, caplog):
+    thread_calls = []
+    registry = object()
+
+    class FakeTracker:
+        def register_actions(self, configured_registry):
+            assert configured_registry is registry
+
+    class FakeBitbucket:
+        def register_actions(self, configured_registry):
+            assert configured_registry is registry
+
+    class FailingOrchestrator:
+        def __init__(
+            self,
+            _config,
+            *,
+            tracker,
+            bitbucket_service,
+            action_registry,
+        ):
+            raise WorkflowStateValidationError(
+                [
+                    "phases.plan.states[0]: unknown Jira state 'Missing'",
+                    "jira.project_statuses: available Jira states: 'Done', 'To Do'",
+                ]
+            )
+
+    monkeypatch.setattr(main, "load_config", lambda _path: {"phases": {}})
+    monkeypatch.setattr(main, "JiraClient", FakeTracker)
+    monkeypatch.setattr(main, "BitbucketService", FakeBitbucket)
+    monkeypatch.setattr(main, "ActionRegistry", lambda: registry)
+    monkeypatch.setattr(main, "SymphonyOrchestrator", FailingOrchestrator)
+    monkeypatch.setattr(
+        main.threading,
+        "Thread",
+        lambda *args, **kwargs: thread_calls.append((args, kwargs)),
+    )
+
+    async def enter_and_exit_lifespan():
+        async with main.lifespan(None):
+            assert main.global_orchestrator is None
+            assert main.global_usage_collector is None
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(enter_and_exit_lifespan())
+
+    assert thread_calls == []
+    assert "unknown Jira state 'Missing'" in caplog.text
+    assert "available Jira states: 'Done', 'To Do'" in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):

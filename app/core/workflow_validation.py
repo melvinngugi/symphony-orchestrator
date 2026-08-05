@@ -22,6 +22,10 @@ class WorkflowValidationError(ValueError):
         super().__init__(f"Invalid workflow configuration:\n{details}")
 
 
+class WorkflowStateValidationError(WorkflowValidationError):
+    """Raised when configured tracker state names are not available."""
+
+
 def validate_workflow_config(
     config: object,
     action_registry: ActionResolver,

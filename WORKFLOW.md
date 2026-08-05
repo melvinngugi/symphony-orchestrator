@@ -16,7 +16,7 @@ phases:
     agent: planner
     states:
       - "To Do"
-      - "Planning"
+      - "In Planning"
     transitions:
       on_start: "In Planning"
       success: 

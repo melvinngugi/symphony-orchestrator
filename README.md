@@ -110,14 +110,20 @@ Each phase must define `states`, a list of Jira state names that trigger that ph
 Before the orchestration thread starts, Symphony validates the workflow structure
 and registered action names, then delegates state-name validation to the configured
 tracker adapter. The Jira adapter requires phase `states`, `on_start`, and both
-simple and expanded completion targets to match a status available to at least one
-issue type in the configured Jira project. Matching is case-insensitive.
+simple and expanded completion targets to match a status available to the configured
+Jira project. Matching is case-insensitive. The adapter resolves `JIRA_PROJECT_KEY`
+to its numeric project ID, then reads every page of Jira's status search API for that
+project, including global statuses used by company-managed workflows. The Jira user
+must have the Administer Projects permission for the project or the Administer Jira
+global permission required by the status search API.
 
-Validation loads project statuses from Jira during every startup. Invalid workflow
-configuration, unavailable Jira credentials or connectivity, and malformed or empty
-status responses are fatal startup errors. State existence is validated; whether a
-specific Jira transition is reachable from a particular issue state remains a
-runtime concern.
+Validation loads project statuses from Jira during every startup. If a configured
+state name is unavailable, Symphony logs the incorrect state and the available Jira
+states without a stack trace; the dashboard remains available but the orchestrator
+does not start. Other invalid workflow configuration, unavailable Jira credentials
+or connectivity, and malformed or empty status responses remain fatal startup
+errors. State existence is validated; whether a specific Jira transition is
+reachable from a particular issue state remains a runtime concern.
 
 ## Tech Stack
 

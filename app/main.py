@@ -10,7 +10,10 @@ import uvicorn
 
 from app.core.config import load_config, settings
 from app.core.orchestrator import SymphonyOrchestrator
-from app.core.workflow_validation import WorkflowValidationError
+from app.core.workflow_validation import (
+    WorkflowStateValidationError,
+    WorkflowValidationError,
+)
 from app.services.actions import ActionRegistry
 from app.services.bitbucket import BitbucketService
 from app.services.jira import JiraClient
@@ -52,6 +55,12 @@ async def lifespan(_: FastAPI):
             bitbucket_service=bitbucket,
             action_registry=action_registry,
         )
+    except WorkflowStateValidationError as exc:
+        global_orchestrator = None
+        global_usage_collector = None
+        logger.error("%s", exc)
+        yield
+        return
     except WorkflowValidationError as exc:
         logger.error("Workflow validation failed: %s", exc)
         raise

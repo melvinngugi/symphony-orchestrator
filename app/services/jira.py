@@ -7,12 +7,15 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import quote
 from app.core.config import settings
 from app.core.workflow_validation import (
+    WorkflowStateValidationError,
     WorkflowValidationError,
     collect_workflow_state_references,
 )
 from app.services.actions import ActionRegistry, PhaseResult
 
 class JiraClient:
+    STATUS_SEARCH_PAGE_SIZE = 100
+
     def __init__(self):
         settings.validate_jira()
         self.auth = HTTPBasicAuth(settings.JIRA_USER_EMAIL, settings.JIRA_API_TOKEN)
@@ -99,53 +102,106 @@ class JiraClient:
 
     def fetch_project_status_names(self) -> set[str]:
         """Return case-insensitively deduplicated statuses for the configured project."""
-        project_key = quote(settings.JIRA_PROJECT_KEY, safe="")
-        url = f"{self.base_url}/rest/api/3/project/{project_key}/statuses"
-        try:
-            response = requests.get(url, headers=self.headers, auth=self.auth)
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Jira project status request failed: {exc}") from exc
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"Jira project status request failed ({response.status_code}): {response.text}"
-            )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ValueError("Jira project status response is not valid JSON") from exc
-        if not isinstance(payload, list):
-            raise ValueError("Jira project status response must be an array")
-
+        project_id = self._fetch_project_id()
+        url = f"{self.base_url}/rest/api/3/statuses/search"
+        start_at = 0
         normalized_names: dict[str, str] = {}
-        for issue_type_index, issue_type in enumerate(payload):
-            if not isinstance(issue_type, dict):
-                raise ValueError(
-                    f"Jira project status response issue type [{issue_type_index}] must be an object"
+
+        while True:
+            params = {
+                "projectId": project_id,
+                "includeGlobalStatuses": True,
+                "startAt": start_at,
+                "maxResults": self.STATUS_SEARCH_PAGE_SIZE,
+            }
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params=params,
                 )
-            statuses = issue_type.get("statuses")
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Jira status search request failed: {exc}") from exc
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Jira status search request failed ({response.status_code}): {response.text}"
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ValueError("Jira status search response is not valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("Jira status search response must be an object")
+
+            page_start = payload.get("startAt")
+            if (
+                not isinstance(page_start, int)
+                or isinstance(page_start, bool)
+                or page_start < 0
+                or page_start != start_at
+            ):
+                raise ValueError(
+                    "Jira status search response startAt must be the requested non-negative integer"
+                )
+            is_last = payload.get("isLast")
+            if not isinstance(is_last, bool):
+                raise ValueError("Jira status search response isLast must be a boolean")
+            statuses = payload.get("values")
             if not isinstance(statuses, list):
-                raise ValueError(
-                    f"Jira project status response issue type [{issue_type_index}].statuses must be an array"
-                )
+                raise ValueError("Jira status search response values must be an array")
+
             for status_index, status in enumerate(statuses):
                 if not isinstance(status, dict):
                     raise ValueError(
-                        "Jira project status response status "
-                        f"[{issue_type_index}][{status_index}] must be an object"
+                        f"Jira status search response status [{status_index}] must be an object"
                     )
                 name = status.get("name")
                 if not isinstance(name, str) or not name.strip():
                     raise ValueError(
-                        "Jira project status response status "
-                        f"[{issue_type_index}][{status_index}].name must be a non-empty string"
+                        "Jira status search response status "
+                        f"[{status_index}].name must be a non-empty string"
                     )
                 clean_name = name.strip()
                 normalized_names.setdefault(clean_name.casefold(), clean_name)
 
+            if is_last:
+                break
+            if not statuses:
+                raise ValueError("Jira status search response pagination made no progress")
+            start_at = page_start + len(statuses)
+
         if not normalized_names:
-            raise ValueError("Jira project status response contains no statuses")
+            raise ValueError("Jira status search response contains no statuses")
         return set(normalized_names.values())
+
+    def _fetch_project_id(self) -> str:
+        """Resolve the configured Jira project key to its numeric project ID."""
+        project_key = quote(settings.JIRA_PROJECT_KEY, safe="")
+        url = f"{self.base_url}/rest/api/3/project/{project_key}"
+        try:
+            response = requests.get(url, headers=self.headers, auth=self.auth)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Jira project lookup request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira project lookup request failed ({response.status_code}): {response.text}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("Jira project lookup response is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Jira project lookup response must be an object")
+        project_id = payload.get("id")
+        if isinstance(project_id, bool) or not isinstance(project_id, (str, int)):
+            raise ValueError("Jira project lookup response id must be a numeric value")
+        clean_project_id = str(project_id).strip()
+        if not clean_project_id.isdigit():
+            raise ValueError("Jira project lookup response id must be a numeric value")
+        return clean_project_id
 
     def validate_workflow_states(self, config: dict[str, Any]) -> None:
         """Validate configured workflow states against this Jira project."""
@@ -163,7 +219,11 @@ class JiraClient:
             if reference.name.casefold() not in valid_names
         ]
         if errors:
-            raise WorkflowValidationError(errors)
+            available_states = ", ".join(
+                f"'{state}'" for state in sorted(valid_states, key=str.casefold)
+            )
+            errors.append(f"jira.project_statuses: available Jira states: {available_states}")
+            raise WorkflowStateValidationError(errors)
 
     def _normalize_issue(self, jira_issue: Dict[str, Any]) -> Dict[str, Any]:
         """
