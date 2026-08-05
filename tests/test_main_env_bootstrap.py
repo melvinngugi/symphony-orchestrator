@@ -108,7 +108,7 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
             pass
 
     class FakeThread:
-        def __init__(self, *, target, daemon):
+        def __init__(self, *, target, daemon, name):
             captured["thread_target"] = target
             captured["thread_daemon"] = daemon
 

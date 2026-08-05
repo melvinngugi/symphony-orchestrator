@@ -201,23 +201,13 @@ class CodexUsageCollector:
         self._snapshot = UsageSnapshot()
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
         self._client: Optional[CodexAppServerClient] = None
-
-    def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="codex-usage", daemon=True)
-        self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         client = self._client
         if client is not None:
             client.close()
-        if self._thread is not None:
-            self._thread.join(timeout=3)
 
     def snapshot(self) -> UsageSnapshot:
         with self._lock:
@@ -229,7 +219,8 @@ class CodexUsageCollector:
             return snapshot.with_status("stale")
         return snapshot
 
-    def _run(self) -> None:
+    def run(self) -> None:
+        self._stop_event.clear()
         while not self._stop_event.is_set():
             client = self.client_factory()
             self._client = client
