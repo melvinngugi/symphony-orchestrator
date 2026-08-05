@@ -59,7 +59,7 @@ class BitbucketService:
         safe_token = urllib.parse.quote(settings.BITBUCKET_API_TOKEN)
 
         # Bitbucket's standard static username for API token authentication in Git commands
-        repo_url = f"https://x-bitbucket-api-token-auth:{safe_token}@bitbucket.org/{self.workspace}/{self.repo_slug}.git"
+        repo_url = f"https://x-token-auth:{safe_token}@bitbucket.org/{self.workspace}/{self.repo_slug}.git"
 
         logger.info(f"Cloning {self.repo_slug} into isolated checkout: {checkout_path}")
         
