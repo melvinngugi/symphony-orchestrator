@@ -6,8 +6,6 @@ agent:
   max_concurrent_agents: 1
 
 tracker:
-  active_states:
-    - "To Do"
   terminal_states:
     - "Done"
   required_labels:
@@ -16,16 +14,30 @@ tracker:
 phases:
   plan:
     agent: planner
+    states:
+      - "To Do"
+      - "In Planning"
     transitions:
-      success: "In Progress"
+      on_start: "In Planning"
+      success: 
+        do:
+          - action: "jira:attach_outputs"
+        next: "Review Plan"
       blocked: "Clarification Needed"
   implement:
     agent: implementer
+    states:
+      - "In Progress"
     transitions:
-      success: "In Progress"
+      success: 
+        next: "In Review"
+        do:
+          - action: "bitbucket:create-pull-request"
       blocked: "Clarification Needed"
-  validate:
-    agent: tester
+  review:
+    agent: reviewer
+    states:
+      - "In Review"
     transitions:
       success: "Done"
       blocked: "Clarification Needed"

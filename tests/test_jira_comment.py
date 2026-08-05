@@ -24,7 +24,7 @@ def test_add_comment_posts_adf_payload(monkeypatch):
     client = JiraClient()
     comment = "[agent planner]: Need additional input\n\n- missing acceptance criteria\n- missing scope"
 
-    success = client.add_comment(issue_key="ABC-123", body=comment)
+    success = client.add_comment(issue_identifier="ABC-123", body=comment)
 
     assert success is True
     assert captured["url"] == "https://example.atlassian.net/rest/api/3/issue/ABC-123/comment"
@@ -57,7 +57,7 @@ def test_add_comment_supports_jira_markdown_star_bullets(monkeypatch):
     client = JiraClient()
     comment = "[agent planner]: Need additional input\n\n* first item\n* second item"
 
-    success = client.add_comment(issue_key="ABC-123", body=comment)
+    success = client.add_comment(issue_identifier="ABC-123", body=comment)
 
     assert success is True
     adf = captured["json"]["body"]

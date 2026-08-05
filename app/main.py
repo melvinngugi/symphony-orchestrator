@@ -10,6 +10,13 @@ import uvicorn
 
 from app.core.config import load_config, settings
 from app.core.orchestrator import SymphonyOrchestrator
+from app.core.workflow_validation import (
+    WorkflowStateValidationError,
+    WorkflowValidationError,
+)
+from app.services.actions import ActionRegistry
+from app.services.bitbucket import BitbucketService
+from app.services.jira import JiraClient
 from app.models.usage import UsageSnapshot
 from app.services.usage import CodexUsageCollector
 
@@ -36,15 +43,39 @@ async def lifespan(_: FastAPI):
     global global_orchestrator, global_usage_collector
     ensure_symphony_home()
     config = load_config("WORKFLOW.md")
-    global_orchestrator = SymphonyOrchestrator(config)
+    try:
+        tracker = JiraClient()
+        bitbucket = BitbucketService()
+        action_registry = ActionRegistry()
+        tracker.register_actions(action_registry)
+        bitbucket.register_actions(action_registry)
+        global_orchestrator = SymphonyOrchestrator(
+            config,
+            tracker=tracker,
+            bitbucket_service=bitbucket,
+            action_registry=action_registry,
+        )
+    except WorkflowStateValidationError as exc:
+        global_orchestrator = None
+        global_usage_collector = None
+        logger.error("%s", exc)
+        yield
+        return
+    except WorkflowValidationError as exc:
+        logger.error("Workflow validation failed: %s", exc)
+        raise
+    
     global_usage_collector = CodexUsageCollector(
         poll_interval_seconds=settings.CODEX_USAGE_POLL_SECONDS,
         stale_after_seconds=settings.CODEX_USAGE_STALE_SECONDS,
     )
-    global_usage_collector.start()
+
+    # Run the usage collector loop in a separate thread so it doesn't block the dashboard API
+    usage_thread = threading.Thread(target=global_usage_collector.run, daemon=True, name="Usage Collector")
+    usage_thread.start()
 
     # Run the orchestrator loop in a separate thread so it doesn't block the dashboard API
-    daemon_thread = threading.Thread(target=global_orchestrator.start, daemon=True)
+    daemon_thread = threading.Thread(target=global_orchestrator.start, daemon=True, name="Orchestrator")
     daemon_thread.start()
 
     try:

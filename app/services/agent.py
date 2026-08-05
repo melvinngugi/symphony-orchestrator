@@ -17,12 +17,14 @@ class AgentExecutionRequest:
     issue: dict
     agent_config: AgentConfig
     workspace_path: str
+    repository_path: str
 
 
 @dataclass
 class RunningAgentExecution:
     agent_name: str
     workspace_path: str
+    repository_path: str
     output_file: Optional[str]
     structured_output_file: Optional[str]
     process: subprocess.Popen
@@ -55,7 +57,12 @@ class SubprocessAgentExecutionController:
             raise ValueError("No command defined for agent")
 
         env = self._build_env(request.agent_config)
-        full_command = self._build_command(request.agent_config, env, request.agent_name)
+        full_command = self._build_command(
+            request.agent_config,
+            env,
+            request.agent_name,
+            request.workspace_path,
+        )
         stdin_content = self._load_stdin_content(request.workspace_path, request.agent_config.stdin)
 
         logger.info(f"Spawning agent with command: {' '.join(full_command)}")
@@ -68,7 +75,7 @@ class SubprocessAgentExecutionController:
         stderr_file = open(log_file_path, "a")
         process = subprocess.Popen(
             full_command,
-            cwd=request.workspace_path,
+            cwd=request.repository_path,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr_file,
@@ -77,13 +84,15 @@ class SubprocessAgentExecutionController:
         )
         stderr_file.close()
 
-        if stdin_content and process.stdin:
-            process.stdin.write(stdin_content)
+        if process.stdin:
+            if stdin_content:
+                process.stdin.write(stdin_content)
             process.stdin.close()
 
         return RunningAgentExecution(
             agent_name=request.agent_name,
             workspace_path=request.workspace_path,
+            repository_path=request.repository_path,
             output_file=request.agent_config.output_file,
             structured_output_file=request.agent_config.structured,
             process=process,
@@ -161,13 +170,11 @@ class SubprocessAgentExecutionController:
             raise ValueError(f"Unsupported structured status '{status}'. Expected 'success' or 'blocked'.")
 
         if execution.output_file:
-            output_path = os.path.join(execution.workspace_path, execution.output_file)
-            try:
-                with open(output_path, "w") as f:
-                    f.write(stdout_content)
-                logger.info(f"Wrote agent output to {output_path}")
-            except Exception as e:
-                logger.error(f"Failed to write output file {output_path}: {e}")
+            output_path = self._resolve_workspace_path(execution.workspace_path, execution.output_file)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "w") as f:
+                f.write(stdout_content)
+            logger.info(f"Wrote agent output to {output_path}")
             return "success", "", [], [execution.output_file]
 
         return "success", "", [], []
@@ -213,6 +220,7 @@ class SubprocessAgentExecutionController:
         if content_type == "text":
             with open(output_path, "w") as f:
                 f.write(content)
+            logger.info(f"Wrote agent output file to {output_path}")
             return
 
         try:
@@ -222,6 +230,7 @@ class SubprocessAgentExecutionController:
 
         with open(output_path, "wb") as f:
             f.write(binary_content)
+        logger.info(f"Wrote agent output file to {output_path}")
 
     def _resolve_workspace_path(self, workspace_path: str, relative_path: str) -> str:
         workspace_abs = os.path.abspath(workspace_path)
@@ -232,10 +241,16 @@ class SubprocessAgentExecutionController:
 
         return target_abs
 
-    def _build_command(self, agent_config: AgentConfig, env: dict[str, str], agent_name: str) -> list[str]:
+    def _build_command(
+        self,
+        agent_config: AgentConfig,
+        env: dict[str, str],
+        agent_name: str,
+        workspace_path: str,
+    ) -> list[str]:
         context = {
-            "output_file": agent_config.output_file or "",
-            "structured": agent_config.structured or "",
+            "output_file": self._artifact_argument(workspace_path, agent_config.output_file),
+            "structured": self._artifact_argument(workspace_path, agent_config.structured),
             "sandbox": agent_config.sandbox or "workspace-write",
         }
 
@@ -248,6 +263,11 @@ class SubprocessAgentExecutionController:
             processed_args.append(rendered)
 
         return [agent_config.command] + processed_args
+
+    def _artifact_argument(self, workspace_path: str, configured_path: Optional[str]) -> str:
+        if not configured_path:
+            return ""
+        return self._resolve_workspace_path(workspace_path, configured_path)
 
     def _expand_env_vars(self, value: str, env: dict[str, str], agent_name: str) -> str:
         missing_vars: set[str] = set()
@@ -278,19 +298,18 @@ class SubprocessAgentExecutionController:
         if not stdin_file:
             return ""
 
-        stdin_file_path = os.path.join(workspace_path, stdin_file)
+        stdin_file_path = self._resolve_workspace_path(workspace_path, stdin_file)
         if not os.path.exists(stdin_file_path):
-            logger.warning(f"Stdin file {stdin_file_path} not found")
-            return ""
+            raise FileNotFoundError(f"Agent stdin file not found: {stdin_file_path}")
 
         try:
             with open(stdin_file_path, "r") as f:
                 content = f.read()
             logger.info(f"Read stdin content from {stdin_file_path}")
             return content
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to read stdin file {stdin_file_path}: {e}")
-            return ""
+            raise
 
     def _read_stderr_content(self, workspace_path: str, agent_name: str) -> str:
         log_file_path = self._log_file_path(workspace_path, agent_name)

@@ -1,8 +1,9 @@
-from app.services.bitbucket import bitbucket_service
+from app.services.bitbucket import BitbucketService
 
 def diagnose_bitbucket():
     print("Running Symphony Bitbucket Diagnostics...")
     try:
+        bitbucket_service = BitbucketService()
         repo_data = bitbucket_service.verify_repository()
         repo_name = repo_data.get("full_name")
         is_private = repo_data.get("is_private")

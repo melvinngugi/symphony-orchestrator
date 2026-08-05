@@ -24,6 +24,8 @@ agents:
       - "--ephemeral"
       - "--sandbox"
       - "{sandbox}"
+      - "--output-schema"
+      - "$SYMPHONY_HOME/agent-output-schema.json"
       - "Implement the following plan in the codebase."
     stdin: "plan.md"
     output_file: "implementation_report.json"
@@ -43,6 +45,22 @@ agents:
     stdin: "implementation_report.json"
     output_file: "test_results.json"
     structured: "tester-result.json"
+    sandbox: "workspace-write"
+    env:
+      - "CODEX_API_KEY"
+
+  reviewer:
+    command: "codex"
+    args:
+      - "exec"
+      - "--ephemeral"
+      - "--sandbox"
+      - "{sandbox}"
+      - "--output-schema"
+      - "$SYMPHONY_HOME/agent-output-schema.json"
+      - "Review the following pull-request"
+    stdin: "pull-request.json"
+    structured: "pr-review_results.json"
     sandbox: "workspace-write"
     env:
       - "CODEX_API_KEY"
