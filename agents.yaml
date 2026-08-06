@@ -14,8 +14,6 @@ agents:
     stdin: "issue.json"
     structured: "planner-result.json"
     sandbox: "workspace-write"
-    env:
-      - "CODEX_API_KEY"
 
   implementer:
     command: "codex"
@@ -31,8 +29,6 @@ agents:
     output_file: "implementation_report.json"
     structured: "implementer-result.json"
     sandbox: "workspace-write"
-    env:
-      - "CODEX_API_KEY"
 
   tester:
     command: "codex"
@@ -46,8 +42,6 @@ agents:
     output_file: "test_results.json"
     structured: "tester-result.json"
     sandbox: "workspace-write"
-    env:
-      - "CODEX_API_KEY"
 
   reviewer:
     command: "codex"
@@ -62,5 +56,3 @@ agents:
     stdin: "pull-request.json"
     structured: "pr-review_results.json"
     sandbox: "workspace-write"
-    env:
-      - "CODEX_API_KEY"

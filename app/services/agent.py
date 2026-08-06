@@ -51,12 +51,27 @@ class AgentExecutionController(Protocol):
 
 class SubprocessAgentExecutionController:
     _ENV_VAR_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    _SAFE_ENV_NAMES = (
+        "PATH",
+        "HOME",
+        "CODEX_HOME",
+        "SYMPHONY_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    )
 
     def start_execution(self, request: AgentExecutionRequest) -> RunningAgentExecution:
         if not request.agent_config.command:
             raise ValueError("No command defined for agent")
 
-        env = self._build_env(request.agent_config)
+        env = self._build_env(request.agent_config, request.agent_name)
         full_command = self._build_command(
             request.agent_config,
             env,
@@ -288,10 +303,20 @@ class SubprocessAgentExecutionController:
             )
         return expanded
 
-    def _build_env(self, agent_config: AgentConfig) -> dict[str, str]:
-        env = os.environ.copy()
+    def _build_env(self, agent_config: AgentConfig, agent_name: str = "unknown") -> dict[str, str]:
+        env = {
+            name: os.environ[name]
+            for name in self._SAFE_ENV_NAMES
+            if name in os.environ
+        }
         for var_name in agent_config.env:
-            env[var_name] = os.getenv(var_name, "")
+            value = os.getenv(var_name)
+            if not value:
+                raise ValueError(
+                    f"Missing required environment variable '{var_name}' "
+                    f"for agent '{agent_name}'"
+                )
+            env[var_name] = value
         return env
 
     def _load_stdin_content(self, workspace_path: str, stdin_file: str) -> str:

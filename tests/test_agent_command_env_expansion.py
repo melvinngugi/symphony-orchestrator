@@ -1,3 +1,5 @@
+import pytest
+
 from app.models.agent_config import AgentConfig
 from app.services.agent import SubprocessAgentExecutionController
 
@@ -127,3 +129,61 @@ def test_build_command_rejects_artifact_path_outside_workspace():
         assert False, "Expected ValueError for an escaping artifact path"
     except ValueError as exc:
         assert "escapes workspace root" in str(exc)
+
+
+def test_build_env_keeps_safe_runtime_values_and_excludes_service_secrets(monkeypatch):
+    controller = SubprocessAgentExecutionController()
+    config = _make_agent_config([])
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setenv("HOME", "/home/agent")
+    monkeypatch.setenv("CODEX_HOME", "/home/agent/.codex")
+    monkeypatch.setenv("SYMPHONY_HOME", "/opt/symphony")
+    monkeypatch.setenv("JIRA_API_TOKEN", "jira-secret")
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "bitbucket-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-secret")
+
+    env = controller._build_env(config, "planner")
+
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert env["HOME"] == "/home/agent"
+    assert env["CODEX_HOME"] == "/home/agent/.codex"
+    assert env["SYMPHONY_HOME"] == "/opt/symphony"
+    assert "JIRA_API_TOKEN" not in env
+    assert "BITBUCKET_API_TOKEN" not in env
+    assert "GROQ_API_KEY" not in env
+
+
+def test_build_env_passes_only_explicitly_declared_additional_values(monkeypatch):
+    controller = SubprocessAgentExecutionController()
+    config = AgentConfig(
+        command="codex",
+        stdin="issue.json",
+        env=["AGENT_SERVICE_TOKEN"],
+    )
+    monkeypatch.setenv("AGENT_SERVICE_TOKEN", "agent-secret")
+    monkeypatch.setenv("UNDECLARED_SERVICE_TOKEN", "not-for-agent")
+
+    env = controller._build_env(config, "planner")
+
+    assert env["AGENT_SERVICE_TOKEN"] == "agent-secret"
+    assert "UNDECLARED_SERVICE_TOKEN" not in env
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_build_env_rejects_missing_or_empty_declared_values(monkeypatch, value):
+    controller = SubprocessAgentExecutionController()
+    config = AgentConfig(
+        command="codex",
+        stdin="issue.json",
+        env=["REQUIRED_AGENT_TOKEN"],
+    )
+    if value is None:
+        monkeypatch.delenv("REQUIRED_AGENT_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("REQUIRED_AGENT_TOKEN", value)
+
+    with pytest.raises(
+        ValueError,
+        match="Missing required environment variable 'REQUIRED_AGENT_TOKEN' for agent 'planner'",
+    ):
+        controller._build_env(config, "planner")
