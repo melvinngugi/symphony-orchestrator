@@ -81,6 +81,62 @@ def test_handle_success_output_returns_blocked_payload(tmp_path):
     assert files == []
 
 
+def test_handle_success_output_extracts_blocked_outputs(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    result_path = tmp_path / "reviewer-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "message": "Changes required",
+                "neededClarifications": ["Handle malformed URLs"],
+                "outputs": [
+                    {
+                        "name": "review.json",
+                        "content": '{"findings": ["malformed URL"]}',
+                        "contentType": "text",
+                    }
+                ],
+            }
+        )
+    )
+    execution = _execution(str(tmp_path), "reviewer-result.json")
+    execution.required_outputs = {"blocked": ["review.json"]}
+
+    status, message, clarifications, files = controller._handle_success_output(
+        execution,
+        "",
+    )
+
+    assert status == "blocked"
+    assert message == "Changes required"
+    assert clarifications == ["Handle malformed URLs"]
+    assert files == ["review.json"]
+    assert json.loads((tmp_path / "review.json").read_text()) == {
+        "findings": ["malformed URL"]
+    }
+
+
+def test_handle_success_output_requires_configured_status_outputs(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    result_path = tmp_path / "reviewer-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "message": "Changes required",
+                "neededClarifications": ["Handle malformed URLs"],
+                "outputs": [],
+            }
+        )
+    )
+    execution = _execution(str(tmp_path), "reviewer-result.json")
+    execution.required_outputs = {"blocked": ["review.json"]}
+
+    with pytest.raises(ValueError, match="missing required output.*review.json"):
+        controller._handle_success_output(execution, "")
+
+
 def test_handle_success_output_rejects_invalid_structured_status(tmp_path):
     controller = SubprocessAgentExecutionController()
     result_path = tmp_path / "planner-result.json"
@@ -280,6 +336,56 @@ def test_start_execution_does_not_fetch_when_stdin_already_exists(monkeypatch, t
             repository_path=str(repository_path),
         )
     )
+
+
+def test_start_execution_refreshes_configured_stdin_from_provider(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-REFRESH"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    stdin_path = workspace_path / "implementation-context.json"
+    stdin_path.write_text('{"reviewFeedback":"old"}')
+
+    class InputProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == (
+                "SHOP-1",
+                "implementation-context.json",
+            )
+            return b'{"reviewFeedback":"new"}'
+
+    class CapturingStdin:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, content):
+            self.value += content
+
+        def close(self):
+            pass
+
+    process = SimpleNamespace(stdin=CapturingStdin())
+    monkeypatch.setattr(
+        "app.services.agent.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    controller = SubprocessAgentExecutionController(input_provider=InputProvider())
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(
+                command="fake-agent",
+                stdin="implementation-context.json",
+                refresh_stdin=True,
+            ),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    assert stdin_path.read_text() == '{"reviewFeedback":"new"}'
+    assert process.stdin.value == '{"reviewFeedback":"new"}'
 
 
 def test_fallback_input_provider_uses_first_available_result():

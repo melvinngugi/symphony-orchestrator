@@ -1,6 +1,8 @@
 import pytest
+from pydantic import ValidationError
 
-from app.core.config import load_agents_config
+from app.core.config import load_agents_config, load_config
+from app.models.agent_config import AgentConfig
 
 
 def test_project_structured_agents_define_result_destination():
@@ -27,3 +29,32 @@ agents:
 
     with pytest.raises(ValueError, match="Structured agent 'broken'"):
         load_agents_config(str(config_path))
+
+
+def test_reviewer_routes_required_changes_to_clarification_needed():
+    registry = load_agents_config("agents.yaml")
+    workflow = load_config("WORKFLOW.md")
+    reviewer_prompt = " ".join(registry.agents["reviewer"].args)
+
+    assert "status success only when there are no findings" in reviewer_prompt
+    assert "return status blocked" in reviewer_prompt
+    assert "summarize every required change in neededClarifications" in reviewer_prompt
+    assert workflow["phases"]["review"]["transitions"]["success"] == "Done"
+    assert workflow["phases"]["review"]["transitions"]["blocked"] == {
+        "next": "Clarification Needed",
+        "do": [{"action": "jira:attach_outputs"}],
+    }
+    assert registry.agents["reviewer"].required_outputs == {
+        "blocked": ["review.json"]
+    }
+    assert registry.agents["implementer"].stdin == "implementation-context.json"
+    assert registry.agents["implementer"].refresh_stdin is True
+
+
+def test_agent_config_rejects_unknown_required_output_status():
+    with pytest.raises(ValidationError, match="success.*blocked"):
+        AgentConfig(
+            command="codex",
+            stdin="issue.json",
+            required_outputs={"needs_work": ["review.json"]},
+        )

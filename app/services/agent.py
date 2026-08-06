@@ -27,6 +27,7 @@ class RunningAgentExecution:
     repository_path: str
     output_file: Optional[str]
     structured_output_file: Optional[str]
+    required_outputs: dict[str, list[str]]
     process: subprocess.Popen
 
 
@@ -134,6 +135,7 @@ class SubprocessAgentExecutionController:
             repository_path=request.repository_path,
             output_file=request.agent_config.output_file,
             structured_output_file=request.agent_config.structured,
+            required_outputs=request.agent_config.required_outputs,
             process=process,
         )
 
@@ -178,20 +180,32 @@ class SubprocessAgentExecutionController:
         if structured_file:
             payload = self._load_structured_result(execution.workspace_path, structured_file)
             status = payload.get("status")
+            if status not in ("success", "blocked"):
+                raise ValueError(
+                    f"Unsupported structured status '{status}'. Expected 'success' or 'blocked'."
+                )
+
+            outputs = payload.get("outputs")
+            if not isinstance(outputs, list):
+                raise ValueError("Structured result must contain an 'outputs' array")
+
+            file_names: list[str] = []
+            for item in outputs:
+                if isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name.strip():
+                        file_names.append(name)
+                self._write_structured_output_file(execution.workspace_path, item)
+
+            required_outputs = getattr(execution, "required_outputs", {}).get(status, [])
+            missing_outputs = [name for name in required_outputs if name not in file_names]
+            if missing_outputs:
+                raise ValueError(
+                    f"Structured result with status '{status}' is missing required output(s): "
+                    f"{', '.join(missing_outputs)}"
+                )
 
             if status == "success":
-                outputs = payload.get("outputs")
-                if not isinstance(outputs, list):
-                    raise ValueError("Structured result with status 'success' must contain an 'outputs' array")
-
-                file_names: list[str] = []
-                for item in outputs:
-                    if isinstance(item, dict):
-                        name = item.get("name")
-                        if isinstance(name, str) and name.strip():
-                            file_names.append(name)
-                    self._write_structured_output_file(execution.workspace_path, item)
-
                 return (
                     "success",
                     payload.get("message", "") if isinstance(payload.get("message"), str) else "",
@@ -204,9 +218,7 @@ class SubprocessAgentExecutionController:
                 clarifications = payload.get("neededClarifications")
                 if not isinstance(clarifications, list):
                     clarifications = []
-                return "blocked", message, [str(v) for v in clarifications], []
-
-            raise ValueError(f"Unsupported structured status '{status}'. Expected 'success' or 'blocked'.")
+                return "blocked", message, [str(v) for v in clarifications], file_names
 
         if execution.output_file:
             output_path = self._resolve_workspace_path(execution.workspace_path, execution.output_file)
@@ -349,7 +361,7 @@ class SubprocessAgentExecutionController:
             return
 
         stdin_path = self._resolve_workspace_path(request.workspace_path, stdin_file)
-        if os.path.exists(stdin_path):
+        if os.path.exists(stdin_path) and not request.agent_config.refresh_stdin:
             return
 
         issue_identifier = request.issue.get("identifier")

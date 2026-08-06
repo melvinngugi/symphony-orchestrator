@@ -40,7 +40,10 @@ phases:
       - "In Review"
     transitions:
       success: "Done"
-      blocked: "Clarification Needed"
+      blocked:
+        next: "Clarification Needed"
+        do:
+          - action: "jira:attach_outputs"
 ---
 
 # Symphony Workflow Definition
