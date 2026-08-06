@@ -1,7 +1,7 @@
+import logging
 import os
 import subprocess
-import logging
-import urllib.parse
+from pathlib import Path
 import requests
 from requests.auth import HTTPBasicAuth
 from app.core.config import settings
@@ -20,6 +20,22 @@ class BitbucketService:
         self.base_workdir = "/tmp/symphony_workspaces"
         
         os.makedirs(self.base_workdir, exist_ok=True)
+
+    def _git_auth_env(self) -> dict[str, str]:
+        """Build a non-interactive Git environment without exposing credentials in argv."""
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_ASKPASS": str(Path(__file__).with_name("git_askpass.sh")),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "SYMPHONY_GIT_USERNAME": "x-bitbucket-api-token-auth",
+                "SYMPHONY_GIT_PASSWORD": settings.BITBUCKET_API_TOKEN,
+            }
+        )
+        return env
 
     def register_actions(self, registry: ActionRegistry) -> None:
         """Register Bitbucket-owned transition actions."""
@@ -55,16 +71,19 @@ class BitbucketService:
         os.makedirs(workspace_path, exist_ok=True)
         checkout_path = repository_path(workspace_path)
 
-        # Safely URL-encode the scoped API Token
-        safe_token = urllib.parse.quote(settings.BITBUCKET_API_TOKEN)
-
-        # Bitbucket's standard static username for API token authentication in Git commands
-        repo_url = f"https://x-token-auth:{safe_token}@bitbucket.org/{self.workspace}/{self.repo_slug}.git"
-
+        # Persist the non-secret static username, while askpass supplies the token.
+        repo_url = (
+            f"https://x-bitbucket-api-token-auth@bitbucket.org/"
+            f"{self.workspace}/{self.repo_slug}.git"
+        )
         logger.info(f"Cloning {self.repo_slug} into isolated checkout: {checkout_path}")
         
         # Clone the repository
-        subprocess.run(["git", "clone", repo_url, checkout_path], check=True)
+        subprocess.run(
+            ["git", "clone", repo_url, checkout_path],
+            check=True,
+            env=self._git_auth_env(),
+        )
 
         # Create and checkout a dedicated feature branch for the Jira ticket
         branch_name = f"feature/{identifier.lower()}"
@@ -194,6 +213,7 @@ class BitbucketService:
             ["git", "push", "--set-upstream", "origin", source_branch],
             cwd=checkout_path,
             check=True,
+            env=self._git_auth_env(),
         )
 
         target_branch = self.get_default_branch()
