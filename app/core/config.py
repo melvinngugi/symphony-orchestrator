@@ -48,7 +48,18 @@ def load_agents_config(file_path: str = "agents.yaml") -> AgentsRegistry:
         return AgentsRegistry(agents={})
     with open(file_path, 'r') as f:
         data = yaml.safe_load(f) or {}
-        return AgentsRegistry.model_validate(data)
+        registry = AgentsRegistry.model_validate(data)
+
+    for agent_name, agent_config in registry.agents.items():
+        if agent_config.structured and not any(
+            "{structured}" in argument for argument in agent_config.args
+        ):
+            raise ValueError(
+                f"Structured agent '{agent_name}' must include the "
+                "'{structured}' placeholder in its args"
+            )
+
+    return registry
 
 def load_config(file_path: str = "WORKFLOW.md") -> Dict[str, Any]:
     """Parses YAML configuration from the workflow definition."""

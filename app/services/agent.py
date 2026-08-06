@@ -5,7 +5,7 @@ import re
 import json
 import base64
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Iterable, Optional, Protocol
 
 from app.models.agent_config import AgentConfig
 
@@ -49,7 +49,27 @@ class AgentExecutionController(Protocol):
         """Returns completion result when finished, otherwise None."""
 
 
+class AgentInputProvider(Protocol):
+    def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        """Return the named issue attachment, or None when it does not exist."""
+
+
+class FallbackAgentInputProvider:
+    """Resolve agent inputs from the first provider that can supply them."""
+
+    def __init__(self, providers: Iterable[AgentInputProvider]):
+        self.providers = tuple(providers)
+
+    def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        for provider in self.providers:
+            content = provider.fetch_attachment(issue_identifier, filename)
+            if content is not None:
+                return content
+        return None
+
+
 class SubprocessAgentExecutionController:
+    _ERROR_LOG_MAX_CHARS = 16_000
     _ENV_VAR_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
     _SAFE_ENV_NAMES = (
         "PATH",
@@ -67,6 +87,9 @@ class SubprocessAgentExecutionController:
         "SSL_CERT_DIR",
     )
 
+    def __init__(self, input_provider: AgentInputProvider | None = None):
+        self.input_provider = input_provider
+
     def start_execution(self, request: AgentExecutionRequest) -> RunningAgentExecution:
         if not request.agent_config.command:
             raise ValueError("No command defined for agent")
@@ -78,6 +101,7 @@ class SubprocessAgentExecutionController:
             request.agent_name,
             request.workspace_path,
         )
+        self._restore_missing_stdin(request)
         stdin_content = self._load_stdin_content(request.workspace_path, request.agent_config.stdin)
 
         logger.info(f"Spawning agent with command: {' '.join(full_command)}")
@@ -319,6 +343,37 @@ class SubprocessAgentExecutionController:
             env[var_name] = value
         return env
 
+    def _restore_missing_stdin(self, request: AgentExecutionRequest) -> None:
+        stdin_file = request.agent_config.stdin
+        if not stdin_file or self.input_provider is None:
+            return
+
+        stdin_path = self._resolve_workspace_path(request.workspace_path, stdin_file)
+        if os.path.exists(stdin_path):
+            return
+
+        issue_identifier = request.issue.get("identifier")
+        if not isinstance(issue_identifier, str) or not issue_identifier.strip():
+            return
+
+        content = self.input_provider.fetch_attachment(
+            issue_identifier.strip(),
+            stdin_file,
+        )
+        if content is None:
+            return
+        if not isinstance(content, bytes):
+            raise TypeError("Agent input provider must return bytes or None")
+
+        os.makedirs(os.path.dirname(stdin_path), exist_ok=True)
+        with open(stdin_path, "wb") as file_handle:
+            file_handle.write(content)
+        logger.info(
+            "Restored agent stdin attachment %s for issue %s",
+            stdin_file,
+            issue_identifier,
+        )
+
     def _load_stdin_content(self, workspace_path: str, stdin_file: str) -> str:
         if not stdin_file:
             return ""
@@ -344,7 +399,13 @@ class SubprocessAgentExecutionController:
         try:
             with open(log_file_path, "r") as f:
                 f.readline()
-                return f.read()
+                content = f.read()
+            if len(content) <= self._ERROR_LOG_MAX_CHARS:
+                return content
+            return (
+                f"[Earlier agent output omitted; full log: {log_file_path}]\n"
+                f"{content[-self._ERROR_LOG_MAX_CHARS:]}"
+            )
         except Exception as e:
             logger.error(f"Failed to read stderr from {log_file_path}: {e}")
             return ""

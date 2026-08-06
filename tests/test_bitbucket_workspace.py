@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,8 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        if command[:3] == ["git", "show-ref", "--verify"]:
+            return SimpleNamespace(returncode=1)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bitbucket_module.subprocess, "run", fake_run)
@@ -50,8 +53,46 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
     assert clone_env["GIT_CONFIG_KEY_0"] == "credential.helper"
     assert clone_env["GIT_CONFIG_VALUE_0"] == ""
     assert calls[1] == (
+        [
+            "git",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/feature/issue-123",
+        ],
+        {"cwd": str(repository_path), "check": False},
+    )
+    assert calls[2] == (
         ["git", "checkout", "-b", "feature/issue-123"],
         {"cwd": str(repository_path), "check": True},
+    )
+
+
+def test_prepare_workspace_checks_out_existing_remote_issue_branch(monkeypatch, tmp_path):
+    service = BitbucketService.__new__(BitbucketService)
+    service.base_workdir = str(tmp_path)
+    service.workspace = "acme"
+    service.repo_slug = "widgets"
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bitbucket_module.subprocess, "run", fake_run)
+
+    service.prepare_workspace("ISSUE-123")
+
+    assert calls[2] == (
+        [
+            "git",
+            "checkout",
+            "--track",
+            "-b",
+            "feature/issue-123",
+            "origin/feature/issue-123",
+        ],
+        {"cwd": str(tmp_path / "ISSUE-123" / "repository"), "check": True},
     )
 
 
@@ -138,6 +179,8 @@ def test_create_pull_request_action_commits_pushes_and_reuses_open_pr(monkeypatc
     )
 
     assert create_calls == []
+    pull_request = (workspace_path / "pull-request.json").read_text()
+    assert '"id": 7' in pull_request
     assert all(call_kwargs.get("cwd") == str(checkout_path) for _, call_kwargs in calls)
     assert [command for command, _ in calls] == [
         ["git", "add", "--all"],
@@ -175,7 +218,11 @@ def test_create_pull_request_action_accepts_clean_retry_and_creates_pr(monkeypat
     monkeypatch.setattr(service, "get_default_branch", lambda: "main")
     monkeypatch.setattr(service, "find_open_pull_request", lambda _source, _target: None)
     create_calls = []
-    monkeypatch.setattr(service, "create_pull_request", lambda **kwargs: create_calls.append(kwargs))
+    def fake_create_pull_request(**kwargs):
+        create_calls.append(kwargs)
+        return {"id": 8, "title": kwargs["title"]}
+
+    monkeypatch.setattr(service, "create_pull_request", fake_create_pull_request)
 
     service.create_pull_request_for_phase(
         _phase_result(
@@ -198,6 +245,36 @@ def test_create_pull_request_action_accepts_clean_retry_and_creates_pr(monkeypat
             "description": "Automated pull request for https://jira.example/browse/ISSUE-456",
         }
     ]
+    assert '"id": 8' in (workspace_path / "pull-request.json").read_text()
+
+
+def test_fetch_attachment_restores_open_pull_request(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(service, "get_default_branch", lambda: "main")
+    monkeypatch.setattr(
+        service,
+        "find_open_pull_request",
+        lambda source, target: {
+            "id": 9,
+            "source": {"branch": {"name": source}},
+            "destination": {"branch": {"name": target}},
+        },
+    )
+
+    content = service.fetch_attachment("ISSUE-9", "pull-request.json")
+
+    assert json.loads(content)["id"] == 9
+
+
+def test_fetch_attachment_ignores_non_bitbucket_input(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(
+        service,
+        "find_open_pull_request",
+        lambda *_args: pytest.fail("Unexpected Bitbucket request"),
+    )
+
+    assert service.fetch_attachment("ISSUE-9", "plan.md") is None
 
 
 def test_create_pull_request_action_rejects_detached_head(monkeypatch, tmp_path):

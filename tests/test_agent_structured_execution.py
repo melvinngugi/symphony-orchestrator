@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.agent_config import AgentConfig
-from app.services.agent import AgentExecutionRequest, SubprocessAgentExecutionController
+from app.services.agent import (
+    AgentExecutionRequest,
+    FallbackAgentInputProvider,
+    SubprocessAgentExecutionController,
+)
 
 
 def _execution(workspace_path: str, structured_output_file: str | None):
@@ -195,6 +199,112 @@ def test_start_execution_does_not_spawn_when_stdin_is_missing(monkeypatch, tmp_p
     assert popen_calls == []
 
 
+def test_start_execution_restores_missing_stdin_from_input_provider(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-RESTORE"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    popen_calls = []
+
+    class InputProvider:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_attachment(self, issue_identifier, filename):
+            self.calls.append((issue_identifier, filename))
+            return b"# Restored plan\n"
+
+    class CapturingStdin:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, content):
+            self.value += content
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = CapturingStdin()
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        popen_calls.append((command, kwargs, process))
+        return process
+
+    monkeypatch.setattr("app.services.agent.subprocess.Popen", fake_popen)
+    provider = InputProvider()
+    controller = SubprocessAgentExecutionController(input_provider=provider)
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(command="fake-agent", stdin="plan.md"),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    assert provider.calls == [("SHOP-1", "plan.md")]
+    assert (workspace_path / "plan.md").read_bytes() == b"# Restored plan\n"
+    assert popen_calls[0][2].stdin.value == "# Restored plan\n"
+
+
+def test_start_execution_does_not_fetch_when_stdin_already_exists(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-LOCAL"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    (workspace_path / "plan.md").write_text("# Local plan\n")
+
+    class InputProvider:
+        def fetch_attachment(self, *_args):
+            pytest.fail("Existing agent input must not be fetched again")
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = SimpleNamespace(write=lambda _content: None, close=lambda: None)
+
+    monkeypatch.setattr(
+        "app.services.agent.subprocess.Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    controller = SubprocessAgentExecutionController(input_provider=InputProvider())
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(command="fake-agent", stdin="plan.md"),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+
+def test_fallback_input_provider_uses_first_available_result():
+    calls = []
+
+    class Provider:
+        def __init__(self, name, result):
+            self.name = name
+            self.result = result
+
+        def fetch_attachment(self, issue_identifier, filename):
+            calls.append((self.name, issue_identifier, filename))
+            return self.result
+
+    provider = FallbackAgentInputProvider(
+        (Provider("jira", None), Provider("bitbucket", b"pull request"))
+    )
+
+    assert provider.fetch_attachment("ISSUE-1", "pull-request.json") == b"pull request"
+    assert calls == [
+        ("jira", "ISSUE-1", "pull-request.json"),
+        ("bitbucket", "ISSUE-1", "pull-request.json"),
+    ]
+
+
 def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(monkeypatch, tmp_path):
     workspace_path = tmp_path / "ISSUE-1"
     repository_path = workspace_path / "repository"
@@ -251,3 +361,18 @@ def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(mon
     assert (workspace_path / "log" / "planner.log").is_file()
     assert not (repository_path / "issue.json").exists()
     assert not (repository_path / "log").exists()
+
+
+def test_read_stderr_returns_tail_and_points_to_full_log(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    controller._ERROR_LOG_MAX_CHARS = 20
+    log_path = tmp_path / "log" / "implementer.log"
+    log_path.parent.mkdir()
+    log_path.write_text("command line\n" + "old output\n" + "final useful error!!")
+
+    content = controller._read_stderr_content(str(tmp_path), "implementer")
+
+    assert "Earlier agent output omitted" in content
+    assert str(log_path) in content
+    assert content.endswith("final useful error!!")
+    assert "old output" not in content

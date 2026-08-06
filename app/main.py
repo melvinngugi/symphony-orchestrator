@@ -15,6 +15,7 @@ from app.core.workflow_validation import (
     WorkflowValidationError,
 )
 from app.services.actions import ActionRegistry
+from app.services.agent import FallbackAgentInputProvider, SubprocessAgentExecutionController
 from app.services.bitbucket import BitbucketService
 from app.services.jira import JiraClient
 from app.models.usage import UsageSnapshot
@@ -54,6 +55,9 @@ async def lifespan(_: FastAPI):
             tracker=tracker,
             bitbucket_service=bitbucket,
             action_registry=action_registry,
+            execution_controller=SubprocessAgentExecutionController(
+                input_provider=FallbackAgentInputProvider((tracker, bitbucket)),
+            ),
         )
     except WorkflowStateValidationError as exc:
         global_orchestrator = None

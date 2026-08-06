@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -85,9 +86,27 @@ class BitbucketService:
             env=self._git_auth_env(),
         )
 
-        # Create and checkout a dedicated feature branch for the Jira ticket
+        # Reuse a previously pushed issue branch when resuming on a fresh host.
         branch_name = f"feature/{identifier.lower()}"
-        subprocess.run(["git", "checkout", "-b", branch_name], cwd=checkout_path, check=True)
+        remote_branch = f"refs/remotes/origin/{branch_name}"
+        remote_exists = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", remote_branch],
+            cwd=checkout_path,
+            check=False,
+        )
+        if remote_exists.returncode == 0:
+            subprocess.run(
+                ["git", "checkout", "--track", "-b", branch_name, f"origin/{branch_name}"],
+                cwd=checkout_path,
+                check=True,
+            )
+        elif remote_exists.returncode == 1:
+            subprocess.run(["git", "checkout", "-b", branch_name], cwd=checkout_path, check=True)
+        else:
+            raise subprocess.CalledProcessError(
+                remote_exists.returncode,
+                ["git", "show-ref", "--verify", "--quiet", remote_branch],
+            )
         
         logger.info(f"Successfully checked out branch {branch_name} for {identifier}")
         return workspace_path
@@ -161,6 +180,31 @@ class BitbucketService:
 
         return None
 
+    def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        """Restore Bitbucket-owned agent input when a phase starts independently."""
+        if filename != "pull-request.json":
+            return None
+
+        source_branch = f"feature/{issue_identifier.lower()}"
+        target_branch = self.get_default_branch()
+        pull_request = self.find_open_pull_request(source_branch, target_branch)
+        if pull_request is None:
+            return None
+        return self._serialize_pull_request(pull_request)
+
+    def _serialize_pull_request(self, pull_request: dict) -> bytes:
+        if not isinstance(pull_request, dict):
+            raise TypeError("Bitbucket pull request must be an object")
+        return (json.dumps(pull_request, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    def _write_pull_request_input(self, workspace_path: str, pull_request: dict) -> None:
+        output_path = os.path.join(workspace_path, "pull-request.json")
+        temporary_path = f"{output_path}.tmp"
+        with open(temporary_path, "wb") as output_file:
+            output_file.write(self._serialize_pull_request(pull_request))
+        os.replace(temporary_path, output_path)
+        logger.info("Wrote pull request input to %s", output_path)
+
     def create_pull_request_for_phase(self, phase_result: PhaseResult) -> None:
         """Commit and push issue changes, then create or reuse a Bitbucket PR."""
         workspace_path = phase_result.workspace_path
@@ -217,14 +261,15 @@ class BitbucketService:
         )
 
         target_branch = self.get_default_branch()
-        if self.find_open_pull_request(source_branch, target_branch):
-            return
+        pull_request = self.find_open_pull_request(source_branch, target_branch)
+        if pull_request is None:
+            issue_url = issue.get("url")
+            description = f"Automated pull request for {issue_url}" if issue_url else ""
+            pull_request = self.create_pull_request(
+                title=pull_request_title,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                description=description,
+            )
 
-        issue_url = issue.get("url")
-        description = f"Automated pull request for {issue_url}" if issue_url else ""
-        self.create_pull_request(
-            title=pull_request_title,
-            source_branch=source_branch,
-            target_branch=target_branch,
-            description=description,
-        )
+        self._write_pull_request_input(workspace_path, pull_request)
