@@ -21,7 +21,11 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
     service.repo_slug = "widgets"
     calls = []
 
-    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_API_TOKEN", "token")
+    monkeypatch.setattr(
+        bitbucket_module.settings,
+        "BITBUCKET_API_TOKEN",
+        "super-secret-credential",
+    )
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -34,12 +38,31 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
 
     assert workspace_path == str(tmp_path / "ISSUE-123")
     assert (tmp_path / "ISSUE-123").is_dir()
+    assert calls[0][0][2] == (
+        "https://x-bitbucket-api-token-auth@bitbucket.org/acme/widgets.git"
+    )
+    assert "super-secret-credential" not in " ".join(calls[0][0])
     assert calls[0][0][-1] == str(repository_path)
-    assert calls[0][1] == {"check": True}
+    assert calls[0][1]["check"] is True
+    clone_env = calls[0][1]["env"]
+    assert clone_env["GIT_TERMINAL_PROMPT"] == "0"
+    assert clone_env["GIT_ASKPASS"].endswith("app/services/git_askpass.sh")
+    assert clone_env["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert clone_env["GIT_CONFIG_VALUE_0"] == ""
     assert calls[1] == (
         ["git", "checkout", "-b", "feature/issue-123"],
         {"cwd": str(repository_path), "check": True},
     )
+
+
+def test_git_auth_env_provides_api_token_to_askpass(monkeypatch):
+    service = BitbucketService.__new__(BitbucketService)
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_API_TOKEN", "secret-token")
+
+    env = service._git_auth_env()
+
+    assert env["SYMPHONY_GIT_USERNAME"] == "x-bitbucket-api-token-auth"
+    assert env["SYMPHONY_GIT_PASSWORD"] == "secret-token"
 
 
 def _service():
