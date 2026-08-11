@@ -38,15 +38,17 @@ def test_reviewer_routes_required_changes_to_clarification_needed():
 
     assert "status success only when there are no findings" in reviewer_prompt
     assert "return status blocked" in reviewer_prompt
-    assert "summarize every required change in neededClarifications" in reviewer_prompt
-    assert workflow["phases"]["review"]["transitions"]["success"] == "Done"
+    assert "summarize every required change clearly in neededClarifications" in reviewer_prompt
+    assert "pull-request comments rather than review.json" in reviewer_prompt
+    assert workflow["phases"]["review"]["transitions"]["success"] == {
+        "next": "Done",
+        "do": [{"action": "bitbucket:publish-review-comment"}],
+    }
     assert workflow["phases"]["review"]["transitions"]["blocked"] == {
         "next": "Clarification Needed",
-        "do": [{"action": "jira:attach_outputs"}],
+        "do": [{"action": "bitbucket:publish-review-comment"}],
     }
-    assert registry.agents["reviewer"].required_outputs == {
-        "blocked": ["review.json"]
-    }
+    assert registry.agents["reviewer"].required_outputs == {}
     assert registry.agents["implementer"].stdin == "implementation-context.json"
     assert registry.agents["implementer"].refresh_stdin is True
 

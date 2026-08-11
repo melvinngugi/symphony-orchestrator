@@ -69,6 +69,59 @@ class FallbackAgentInputProvider:
         return None
 
 
+class ImplementationContextInputProvider:
+    """Compose implementation input from tracker planning and SCM review data."""
+
+    CONTEXT_FILENAME = "implementation-context.json"
+    PLAN_FILENAME = "plan.md"
+    REVIEW_FILENAME = "pull-request-comments.json"
+
+    def __init__(
+        self,
+        plan_provider: AgentInputProvider,
+        review_provider: AgentInputProvider,
+    ):
+        self.plan_provider = plan_provider
+        self.review_provider = review_provider
+
+    def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        if filename != self.CONTEXT_FILENAME:
+            return None
+
+        plan_content = self.plan_provider.fetch_attachment(
+            issue_identifier,
+            self.PLAN_FILENAME,
+        )
+        if plan_content is None:
+            return None
+        try:
+            plan = plan_content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("plan.md input must be UTF-8 text") from exc
+
+        review_content = self.review_provider.fetch_attachment(
+            issue_identifier,
+            self.REVIEW_FILENAME,
+        )
+        review_feedback = None
+        if review_content is not None:
+            try:
+                review_feedback = json.loads(review_content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "pull-request-comments.json input must contain UTF-8 JSON"
+                ) from exc
+            if not isinstance(review_feedback, dict):
+                raise ValueError("pull-request-comments.json input must be a JSON object")
+
+        context = {
+            "issue": issue_identifier,
+            "plan": plan,
+            "reviewFeedback": review_feedback,
+        }
+        return (json.dumps(context, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 class SubprocessAgentExecutionController:
     _ERROR_LOG_MAX_CHARS = 16_000
     _ENV_VAR_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

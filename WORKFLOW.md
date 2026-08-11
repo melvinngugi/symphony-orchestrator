@@ -39,11 +39,14 @@ phases:
     states:
       - "In Review"
     transitions:
-      success: "Done"
+      success:
+        next: "Done"
+        do:
+          - action: "bitbucket:publish-review-comment"
       blocked:
         next: "Clarification Needed"
         do:
-          - action: "jira:attach_outputs"
+          - action: "bitbucket:publish-review-comment"
 ---
 
 # Symphony Workflow Definition

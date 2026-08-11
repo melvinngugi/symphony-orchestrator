@@ -89,6 +89,13 @@ pull request to the Bitbucket default branch. An existing open pull request for 
 same source and destination branches is reused. The configured API token therefore
 needs repository write and pull-request permissions.
 
+The `bitbucket:publish-review-comment` action publishes the normalized reviewer
+message and required changes as Markdown on the existing pull request. A hidden
+issue-and-commit marker makes transition retries update the same comment instead of
+creating duplicates. Both passing and blocked reviews publish a readable PR result
+before Jira is transitioned, so the configured API token must also be permitted to
+read and write pull-request comments.
+
 Action-providing adapters register their handlers in the application-owned action
 registry during startup. The orchestrator receives that registry through a read-only
 resolver interface and never changes registrations. Action names must be unique;
@@ -104,13 +111,15 @@ transition. A phase without outputs is a successful no-op. Failed uploads retry 
 the pending action and may create duplicate same-name attachments if Jira processed
 an earlier request whose response was lost.
 
-The configured review-blocked transition attaches `review.json` before moving the
-ticket to `Clarification Needed`. When the ticket later returns to `In Progress`,
-the Jira input provider builds `implementation-context.json` from the latest
-`plan.md` and `review.json` attachments. The implementer therefore updates the
-existing issue branch using the original plan plus the newest review findings.
-This synthesized input is refreshed for every implementation dispatch so repeated
-review and remediation cycles cannot reuse stale feedback.
+Review feedback is not attached to Jira as `review.json`. Jira retains a concise
+agent comment and the workflow state, while Bitbucket pull-request comments are the
+durable human review record. When a ticket returns to `In Progress`, an executor-owned
+input provider builds `implementation-context.json` from Jira's latest `plan.md` and
+the active Bitbucket PR comments. Resolved comments and Symphony comments for older
+source commits are excluded. This synthesized input is refreshed for every
+implementation dispatch, so the implementer updates the existing issue branch using
+the original plan plus current automated and human review feedback without receiving
+Jira or Bitbucket credentials.
 
 Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
 

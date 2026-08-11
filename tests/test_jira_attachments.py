@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -300,46 +299,3 @@ def test_fetch_attachment_returns_none_without_matching_filename(monkeypatch):
 
     assert client.fetch_attachment("ABC-123", "plan.md") is None
     assert len(calls) == 1
-
-
-def test_fetch_attachment_builds_implementation_context_from_plan_and_review(monkeypatch):
-    client = _client(monkeypatch)
-    attachments = {
-        "plan.md": b"# Build the application\n",
-        "review.json": b'{"findings":[{"title":"Handle malformed URLs"}]}',
-    }
-    monkeypatch.setattr(
-        client,
-        "_fetch_named_attachment",
-        lambda _issue, filename: attachments.get(filename),
-    )
-
-    content = client.fetch_attachment("ABC-123", "implementation-context.json")
-
-    assert json.loads(content) == {
-        "issue": "ABC-123",
-        "plan": "# Build the application\n",
-        "reviewFeedback": {
-            "findings": [{"title": "Handle malformed URLs"}]
-        },
-    }
-
-
-def test_fetch_attachment_builds_initial_context_without_review(monkeypatch):
-    client = _client(monkeypatch)
-    monkeypatch.setattr(
-        client,
-        "_fetch_named_attachment",
-        lambda _issue, filename: b"# Initial plan\n" if filename == "plan.md" else None,
-    )
-
-    content = client.fetch_attachment("ABC-123", "implementation-context.json")
-
-    assert json.loads(content)["reviewFeedback"] is None
-
-
-def test_fetch_attachment_cannot_build_context_without_plan(monkeypatch):
-    client = _client(monkeypatch)
-    monkeypatch.setattr(client, "_fetch_named_attachment", lambda *_args: None)
-
-    assert client.fetch_attachment("ABC-123", "implementation-context.json") is None

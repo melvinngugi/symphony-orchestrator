@@ -1,5 +1,4 @@
 from contextlib import ExitStack
-import json
 import mimetypes
 import os
 import requests
@@ -82,34 +81,7 @@ class JiraClient:
 
     def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
         """Download the newest Jira attachment with the requested filename."""
-        if filename == "implementation-context.json":
-            return self._build_implementation_context(issue_identifier)
         return self._fetch_named_attachment(issue_identifier, filename)
-
-    def _build_implementation_context(self, issue_identifier: str) -> bytes | None:
-        plan_content = self._fetch_named_attachment(issue_identifier, "plan.md")
-        if plan_content is None:
-            return None
-
-        try:
-            plan = plan_content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Jira plan.md attachment must be UTF-8 text") from exc
-
-        review_content = self._fetch_named_attachment(issue_identifier, "review.json")
-        review_feedback = None
-        if review_content is not None:
-            try:
-                review_feedback = json.loads(review_content.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError("Jira review.json attachment must contain UTF-8 JSON") from exc
-
-        context = {
-            "issue": issue_identifier,
-            "plan": plan,
-            "reviewFeedback": review_feedback,
-        }
-        return (json.dumps(context, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     def _fetch_named_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
         """Download the newest Jira attachment with an exact filename match."""

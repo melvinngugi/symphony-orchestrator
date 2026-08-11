@@ -29,7 +29,7 @@ agents:
       - "$SYMPHONY_HOME/agent-output-schema.json"
       - "--output-last-message"
       - "{structured}"
-      - "Implement the request provided as JSON on stdin. Work from the existing repository state rather than recreating completed work. Follow the original plan, and when reviewFeedback is present, prioritize resolving every listed review finding. Return the requested structured result. On success, include implementation_report.json as a text output summarizing the changes and verification performed."
+      - "Implement the request provided as JSON on stdin. Work from the existing repository state rather than recreating completed work. Follow the original plan, and when reviewFeedback is present, prioritize unresolved pull-request comments and required changes for the current source commit. Return the requested structured result. On success, include implementation_report.json as a text output summarizing the changes and verification performed."
     stdin: "implementation-context.json"
     refresh_stdin: true
     output_file: "implementation_report.json"
@@ -70,10 +70,7 @@ agents:
       - "$SYMPHONY_HOME/agent-output-schema.json"
       - "--output-last-message"
       - "{structured}"
-      - "Review the pull request provided on stdin and return the requested structured result. Return status success only when there are no findings that require a code or configuration change. If any finding requires remediation, including any finding described as blocking or assigned priority P0, P1, or P2, return status blocked, summarize every required change in neededClarifications, and include review.json as a text output containing the detailed findings. A passing build or test suite does not override review findings."
+      - "Review the pull request provided on stdin and return the requested structured result. Return status success only when there are no findings that require a code or configuration change. If any finding requires remediation, including any finding described as blocking or assigned priority P0, P1, or P2, return status blocked and summarize every required change clearly in neededClarifications. Keep message concise and readable because Symphony publishes it to Jira and Bitbucket. Return an empty outputs array; review feedback is persisted as pull-request comments rather than review.json. A passing build or test suite does not override review findings."
     stdin: "pull-request.json"
     structured: "pr-review_results.json"
-    required_outputs:
-      blocked:
-        - "review.json"
     sandbox: "workspace-write"

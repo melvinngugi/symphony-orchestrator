@@ -8,6 +8,7 @@ from app.models.agent_config import AgentConfig
 from app.services.agent import (
     AgentExecutionRequest,
     FallbackAgentInputProvider,
+    ImplementationContextInputProvider,
     SubprocessAgentExecutionController,
 )
 
@@ -409,6 +410,89 @@ def test_fallback_input_provider_uses_first_available_result():
         ("jira", "ISSUE-1", "pull-request.json"),
         ("bitbucket", "ISSUE-1", "pull-request.json"),
     ]
+
+
+def test_implementation_context_combines_plan_and_pull_request_comments():
+    class PlanProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == ("SHOP-1", "plan.md")
+            return b"# Build the application\n"
+
+    class ReviewProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == (
+                "SHOP-1",
+                "pull-request-comments.json",
+            )
+            return json.dumps(
+                {
+                    "pullRequest": {"id": 4, "sourceCommit": "abc123"},
+                    "activeComments": [
+                        {"id": 8, "content": "Handle malformed URLs"}
+                    ],
+                }
+            ).encode()
+
+    provider = ImplementationContextInputProvider(PlanProvider(), ReviewProvider())
+
+    content = provider.fetch_attachment("SHOP-1", "implementation-context.json")
+
+    assert json.loads(content) == {
+        "issue": "SHOP-1",
+        "plan": "# Build the application\n",
+        "reviewFeedback": {
+            "pullRequest": {"id": 4, "sourceCommit": "abc123"},
+            "activeComments": [{"id": 8, "content": "Handle malformed URLs"}],
+        },
+    }
+
+
+def test_implementation_context_allows_initial_run_without_pull_request():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(
+        Provider(b"# Initial plan\n"),
+        Provider(None),
+    )
+
+    content = provider.fetch_attachment("SHOP-1", "implementation-context.json")
+
+    assert json.loads(content)["reviewFeedback"] is None
+
+
+def test_implementation_context_requires_plan():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(Provider(None), Provider(b"{}"))
+
+    assert provider.fetch_attachment("SHOP-1", "implementation-context.json") is None
+
+
+def test_implementation_context_rejects_malformed_review_data():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(
+        Provider(b"# Plan\n"),
+        Provider(b"not-json"),
+    )
+
+    with pytest.raises(ValueError, match="pull-request-comments.json"):
+        provider.fetch_attachment("SHOP-1", "implementation-context.json")
 
 
 def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(monkeypatch, tmp_path):
