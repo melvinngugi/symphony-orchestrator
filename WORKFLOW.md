@@ -39,8 +39,14 @@ phases:
     states:
       - "In Review"
     transitions:
-      success: "Done"
-      blocked: "Clarification Needed"
+      success:
+        next: "Done"
+        do:
+          - action: "bitbucket:publish-review-comment"
+      blocked:
+        next: "Clarification Needed"
+        do:
+          - action: "bitbucket:publish-review-comment"
 ---
 
 # Symphony Workflow Definition

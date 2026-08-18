@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.agent_config import AgentConfig
-from app.services.agent import AgentExecutionRequest, SubprocessAgentExecutionController
+from app.services.agent import (
+    AgentExecutionRequest,
+    FallbackAgentInputProvider,
+    ImplementationContextInputProvider,
+    SubprocessAgentExecutionController,
+)
 
 
 def _execution(workspace_path: str, structured_output_file: str | None):
@@ -75,6 +80,62 @@ def test_handle_success_output_returns_blocked_payload(tmp_path):
     assert message == "Need additional input"
     assert clarifications == ["missing acceptance criteria"]
     assert files == []
+
+
+def test_handle_success_output_extracts_blocked_outputs(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    result_path = tmp_path / "reviewer-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "message": "Changes required",
+                "neededClarifications": ["Handle malformed URLs"],
+                "outputs": [
+                    {
+                        "name": "review.json",
+                        "content": '{"findings": ["malformed URL"]}',
+                        "contentType": "text",
+                    }
+                ],
+            }
+        )
+    )
+    execution = _execution(str(tmp_path), "reviewer-result.json")
+    execution.required_outputs = {"blocked": ["review.json"]}
+
+    status, message, clarifications, files = controller._handle_success_output(
+        execution,
+        "",
+    )
+
+    assert status == "blocked"
+    assert message == "Changes required"
+    assert clarifications == ["Handle malformed URLs"]
+    assert files == ["review.json"]
+    assert json.loads((tmp_path / "review.json").read_text()) == {
+        "findings": ["malformed URL"]
+    }
+
+
+def test_handle_success_output_requires_configured_status_outputs(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    result_path = tmp_path / "reviewer-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked",
+                "message": "Changes required",
+                "neededClarifications": ["Handle malformed URLs"],
+                "outputs": [],
+            }
+        )
+    )
+    execution = _execution(str(tmp_path), "reviewer-result.json")
+    execution.required_outputs = {"blocked": ["review.json"]}
+
+    with pytest.raises(ValueError, match="missing required output.*review.json"):
+        controller._handle_success_output(execution, "")
 
 
 def test_handle_success_output_rejects_invalid_structured_status(tmp_path):
@@ -195,6 +256,245 @@ def test_start_execution_does_not_spawn_when_stdin_is_missing(monkeypatch, tmp_p
     assert popen_calls == []
 
 
+def test_start_execution_restores_missing_stdin_from_input_provider(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-RESTORE"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    popen_calls = []
+
+    class InputProvider:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_attachment(self, issue_identifier, filename):
+            self.calls.append((issue_identifier, filename))
+            return b"# Restored plan\n"
+
+    class CapturingStdin:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, content):
+            self.value += content
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = CapturingStdin()
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        popen_calls.append((command, kwargs, process))
+        return process
+
+    monkeypatch.setattr("app.services.agent.subprocess.Popen", fake_popen)
+    provider = InputProvider()
+    controller = SubprocessAgentExecutionController(input_provider=provider)
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(command="fake-agent", stdin="plan.md"),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    assert provider.calls == [("SHOP-1", "plan.md")]
+    assert (workspace_path / "plan.md").read_bytes() == b"# Restored plan\n"
+    assert popen_calls[0][2].stdin.value == "# Restored plan\n"
+
+
+def test_start_execution_does_not_fetch_when_stdin_already_exists(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-LOCAL"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    (workspace_path / "plan.md").write_text("# Local plan\n")
+
+    class InputProvider:
+        def fetch_attachment(self, *_args):
+            pytest.fail("Existing agent input must not be fetched again")
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = SimpleNamespace(write=lambda _content: None, close=lambda: None)
+
+    monkeypatch.setattr(
+        "app.services.agent.subprocess.Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    controller = SubprocessAgentExecutionController(input_provider=InputProvider())
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(command="fake-agent", stdin="plan.md"),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+
+def test_start_execution_refreshes_configured_stdin_from_provider(monkeypatch, tmp_path):
+    workspace_path = tmp_path / "ISSUE-REFRESH"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    stdin_path = workspace_path / "implementation-context.json"
+    stdin_path.write_text('{"reviewFeedback":"old"}')
+
+    class InputProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == (
+                "SHOP-1",
+                "implementation-context.json",
+            )
+            return b'{"reviewFeedback":"new"}'
+
+    class CapturingStdin:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, content):
+            self.value += content
+
+        def close(self):
+            pass
+
+    process = SimpleNamespace(stdin=CapturingStdin())
+    monkeypatch.setattr(
+        "app.services.agent.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    controller = SubprocessAgentExecutionController(input_provider=InputProvider())
+
+    controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="implementer",
+            issue={"id": "1", "identifier": "SHOP-1"},
+            agent_config=AgentConfig(
+                command="fake-agent",
+                stdin="implementation-context.json",
+                refresh_stdin=True,
+            ),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    assert stdin_path.read_text() == '{"reviewFeedback":"new"}'
+    assert process.stdin.value == '{"reviewFeedback":"new"}'
+
+
+def test_fallback_input_provider_uses_first_available_result():
+    calls = []
+
+    class Provider:
+        def __init__(self, name, result):
+            self.name = name
+            self.result = result
+
+        def fetch_attachment(self, issue_identifier, filename):
+            calls.append((self.name, issue_identifier, filename))
+            return self.result
+
+    provider = FallbackAgentInputProvider(
+        (Provider("jira", None), Provider("bitbucket", b"pull request"))
+    )
+
+    assert provider.fetch_attachment("ISSUE-1", "pull-request.json") == b"pull request"
+    assert calls == [
+        ("jira", "ISSUE-1", "pull-request.json"),
+        ("bitbucket", "ISSUE-1", "pull-request.json"),
+    ]
+
+
+def test_implementation_context_combines_plan_and_pull_request_comments():
+    class PlanProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == ("SHOP-1", "plan.md")
+            return b"# Build the application\n"
+
+    class ReviewProvider:
+        def fetch_attachment(self, issue_identifier, filename):
+            assert (issue_identifier, filename) == (
+                "SHOP-1",
+                "pull-request-comments.json",
+            )
+            return json.dumps(
+                {
+                    "pullRequest": {"id": 4, "sourceCommit": "abc123"},
+                    "activeComments": [
+                        {"id": 8, "content": "Handle malformed URLs"}
+                    ],
+                }
+            ).encode()
+
+    provider = ImplementationContextInputProvider(PlanProvider(), ReviewProvider())
+
+    content = provider.fetch_attachment("SHOP-1", "implementation-context.json")
+
+    assert json.loads(content) == {
+        "issue": "SHOP-1",
+        "plan": "# Build the application\n",
+        "reviewFeedback": {
+            "pullRequest": {"id": 4, "sourceCommit": "abc123"},
+            "activeComments": [{"id": 8, "content": "Handle malformed URLs"}],
+        },
+    }
+
+
+def test_implementation_context_allows_initial_run_without_pull_request():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(
+        Provider(b"# Initial plan\n"),
+        Provider(None),
+    )
+
+    content = provider.fetch_attachment("SHOP-1", "implementation-context.json")
+
+    assert json.loads(content)["reviewFeedback"] is None
+
+
+def test_implementation_context_requires_plan():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(Provider(None), Provider(b"{}"))
+
+    assert provider.fetch_attachment("SHOP-1", "implementation-context.json") is None
+
+
+def test_implementation_context_rejects_malformed_review_data():
+    class Provider:
+        def __init__(self, content):
+            self.content = content
+
+        def fetch_attachment(self, *_args):
+            return self.content
+
+    provider = ImplementationContextInputProvider(
+        Provider(b"# Plan\n"),
+        Provider(b"not-json"),
+    )
+
+    with pytest.raises(ValueError, match="pull-request-comments.json"):
+        provider.fetch_attachment("SHOP-1", "implementation-context.json")
+
+
 def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(monkeypatch, tmp_path):
     workspace_path = tmp_path / "ISSUE-1"
     repository_path = workspace_path / "repository"
@@ -251,3 +551,18 @@ def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(mon
     assert (workspace_path / "log" / "planner.log").is_file()
     assert not (repository_path / "issue.json").exists()
     assert not (repository_path / "log").exists()
+
+
+def test_read_stderr_returns_tail_and_points_to_full_log(tmp_path):
+    controller = SubprocessAgentExecutionController()
+    controller._ERROR_LOG_MAX_CHARS = 20
+    log_path = tmp_path / "log" / "implementer.log"
+    log_path.parent.mkdir()
+    log_path.write_text("command line\n" + "old output\n" + "final useful error!!")
+
+    content = controller._read_stderr_content(str(tmp_path), "implementer")
+
+    assert "Earlier agent output omitted" in content
+    assert str(log_path) in content
+    assert content.endswith("final useful error!!")
+    assert "old output" not in content

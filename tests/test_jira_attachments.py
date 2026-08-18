@@ -232,3 +232,70 @@ def test_attach_outputs_rejects_invalid_json_response(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="not valid JSON"):
         client.attach_outputs(_phase_result(tmp_path, ["plan.md"]))
+
+
+def test_fetch_attachment_downloads_newest_matching_attachment(monkeypatch):
+    client = _client(monkeypatch)
+    responses = [
+        SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {
+                "fields": {
+                    "attachment": [
+                        {
+                            "id": "10",
+                            "filename": "plan.md",
+                            "created": "2026-08-01T10:00:00.000+0000",
+                        },
+                        {"id": "11", "filename": "notes.md"},
+                        {
+                            "id": "12",
+                            "filename": "plan.md",
+                            "created": "2026-08-02T10:00:00.000+0000",
+                        },
+                    ]
+                }
+            },
+        ),
+        SimpleNamespace(status_code=200, text="", content=b"# Latest plan\n"),
+    ]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    monkeypatch.setattr(jira_module.requests, "get", fake_get)
+
+    content = client.fetch_attachment("ABC-123", "plan.md")
+
+    assert content == b"# Latest plan\n"
+    assert calls[0][0].endswith("/rest/api/3/issue/ABC-123")
+    assert calls[0][1]["params"] == {"fields": "attachment"}
+    assert calls[1][0].endswith("/rest/api/3/attachment/content/12")
+    assert calls[1][1]["params"] == {"redirect": "false"}
+    assert all(call[1]["auth"] is client.auth for call in calls)
+
+
+def test_fetch_attachment_returns_none_without_matching_filename(monkeypatch):
+    client = _client(monkeypatch)
+    response = SimpleNamespace(
+        status_code=200,
+        text="",
+        json=lambda: {
+            "fields": {
+                "attachment": [{"id": "11", "filename": "notes.md"}]
+            }
+        },
+    )
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return response
+
+    monkeypatch.setattr(jira_module.requests, "get", fake_get)
+
+    assert client.fetch_attachment("ABC-123", "plan.md") is None
+    assert len(calls) == 1

@@ -116,3 +116,9 @@ def test_shipped_workflow_actions_are_registered_by_composed_adapters():
     assert transitions[("implement", "success")].actions == (
         "bitbucket:create-pull-request",
     )
+    assert transitions[("review", "success")].actions == (
+        "bitbucket:publish-review-comment",
+    )
+    assert transitions[("review", "blocked")].actions == (
+        "bitbucket:publish-review-comment",
+    )

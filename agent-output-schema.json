@@ -10,7 +10,7 @@
                 "success",
                 "blocked"
             ],
-            "description": "Status of the agent execution"
+            "description": "Whether the current phase may proceed. Use success only when no further work is required for this phase. Use blocked whenever clarification or remediation is required, including code-review findings that require changes."
         },
         "message": {
             "type": "string",
@@ -21,7 +21,7 @@
             "items": {
                 "type": "string"
             },
-            "description": "Clarifications needed when status is 'blocked'; otherwise an empty array"
+            "description": "Clarifications or remediation items required when status is 'blocked'; otherwise an empty array"
         },
         "outputs": {
             "type": "array",

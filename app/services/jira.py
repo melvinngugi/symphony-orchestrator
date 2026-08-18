@@ -79,6 +79,79 @@ class JiraClient:
             ):
                 raise ValueError("Jira attachment response must be a non-empty attachment array")
 
+    def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        """Download the newest Jira attachment with the requested filename."""
+        return self._fetch_named_attachment(issue_identifier, filename)
+
+    def _fetch_named_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
+        """Download the newest Jira attachment with an exact filename match."""
+        issue_key = quote(issue_identifier.strip(), safe="")
+        issue_url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
+        try:
+            response = requests.get(
+                issue_url,
+                headers=self.headers,
+                auth=self.auth,
+                params={"fields": "attachment"},
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Jira attachment metadata request failed: {exc}") from exc
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira attachment metadata request failed ({response.status_code}): "
+                f"{response.text}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("Jira attachment metadata response is not valid JSON") from exc
+        fields = payload.get("fields") if isinstance(payload, dict) else None
+        attachments = fields.get("attachment") if isinstance(fields, dict) else None
+        if not isinstance(attachments, list):
+            raise ValueError("Jira attachment metadata response must contain an attachment array")
+
+        matching: list[tuple[int, dict[str, Any]]] = [
+            (index, attachment)
+            for index, attachment in enumerate(attachments)
+            if isinstance(attachment, dict) and attachment.get("filename") == filename
+        ]
+        if not matching:
+            return None
+
+        def attachment_order(entry: tuple[int, dict[str, Any]]) -> tuple[str, int, int]:
+            index, attachment = entry
+            created = attachment.get("created")
+            attachment_id = attachment.get("id")
+            numeric_id = int(attachment_id) if str(attachment_id).isdigit() else -1
+            return created if isinstance(created, str) else "", numeric_id, index
+
+        _, latest = max(matching, key=attachment_order)
+        attachment_id = latest.get("id")
+        if not isinstance(attachment_id, (str, int)) or not str(attachment_id).strip():
+            raise ValueError("Jira attachment metadata is missing an attachment id")
+
+        content_url = (
+            f"{self.base_url}/rest/api/3/attachment/content/"
+            f"{quote(str(attachment_id).strip(), safe='')}"
+        )
+        try:
+            content_response = requests.get(
+                content_url,
+                headers=self.headers,
+                auth=self.auth,
+                params={"redirect": "false"},
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Jira attachment content request failed: {exc}") from exc
+
+        if content_response.status_code != 200:
+            raise RuntimeError(
+                f"Jira attachment content request failed ({content_response.status_code}): "
+                f"{content_response.text}"
+            )
+        return content_response.content
+
     @staticmethod
     def _resolve_output_path(workspace_path: str, output_name: object) -> str:
         if not isinstance(output_name, str) or not output_name.strip():

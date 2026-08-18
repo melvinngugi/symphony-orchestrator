@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,8 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        if command[:3] == ["git", "show-ref", "--verify"]:
+            return SimpleNamespace(returncode=1)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bitbucket_module.subprocess, "run", fake_run)
@@ -50,8 +53,46 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
     assert clone_env["GIT_CONFIG_KEY_0"] == "credential.helper"
     assert clone_env["GIT_CONFIG_VALUE_0"] == ""
     assert calls[1] == (
+        [
+            "git",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/feature/issue-123",
+        ],
+        {"cwd": str(repository_path), "check": False},
+    )
+    assert calls[2] == (
         ["git", "checkout", "-b", "feature/issue-123"],
         {"cwd": str(repository_path), "check": True},
+    )
+
+
+def test_prepare_workspace_checks_out_existing_remote_issue_branch(monkeypatch, tmp_path):
+    service = BitbucketService.__new__(BitbucketService)
+    service.base_workdir = str(tmp_path)
+    service.workspace = "acme"
+    service.repo_slug = "widgets"
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bitbucket_module.subprocess, "run", fake_run)
+
+    service.prepare_workspace("ISSUE-123")
+
+    assert calls[2] == (
+        [
+            "git",
+            "checkout",
+            "--track",
+            "-b",
+            "feature/issue-123",
+            "origin/feature/issue-123",
+        ],
+        {"cwd": str(tmp_path / "ISSUE-123" / "repository"), "check": True},
     )
 
 
@@ -84,6 +125,34 @@ def _phase_result(workspace_path, issue):
     )
 
 
+def _review_phase_result(workspace_path, status="blocked"):
+    return PhaseResult(
+        issue={"id": "123", "identifier": "ISSUE-123", "title": "Review changes"},
+        workspace_path=str(workspace_path),
+        repository_path=str(workspace_path / "repository"),
+        phase_name="review",
+        agent_name="reviewer",
+        agent_config=AgentConfig(command="fake", stdin="pull-request.json"),
+        execution=AgentExecutionResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            status=status,
+            message=(
+                "One reliability issue requires changes."
+                if status == "blocked"
+                else "No blocking findings."
+            ),
+            needed_clarifications=(
+                ["Return HTTP 400 for malformed request targets."]
+                if status == "blocked"
+                else []
+            ),
+            files=[],
+        ),
+    )
+
+
 def test_bitbucket_registers_pull_request_action_as_bound_handler():
     service = _service()
     registry = ActionRegistry()
@@ -93,6 +162,9 @@ def test_bitbucket_registers_pull_request_action_as_bound_handler():
     handler = registry.resolve("bitbucket:create-pull-request")
     assert handler.__self__ is service
     assert handler.__func__ is BitbucketService.create_pull_request_for_phase
+    review_handler = registry.resolve("bitbucket:publish-review-comment")
+    assert review_handler.__self__ is service
+    assert review_handler.__func__ is BitbucketService.publish_review_comment_for_phase
 
 
 def test_bitbucket_duplicate_registration_is_rejected_by_registry():
@@ -138,6 +210,8 @@ def test_create_pull_request_action_commits_pushes_and_reuses_open_pr(monkeypatc
     )
 
     assert create_calls == []
+    pull_request = (workspace_path / "pull-request.json").read_text()
+    assert '"id": 7' in pull_request
     assert all(call_kwargs.get("cwd") == str(checkout_path) for _, call_kwargs in calls)
     assert [command for command, _ in calls] == [
         ["git", "add", "--all"],
@@ -175,7 +249,11 @@ def test_create_pull_request_action_accepts_clean_retry_and_creates_pr(monkeypat
     monkeypatch.setattr(service, "get_default_branch", lambda: "main")
     monkeypatch.setattr(service, "find_open_pull_request", lambda _source, _target: None)
     create_calls = []
-    monkeypatch.setattr(service, "create_pull_request", lambda **kwargs: create_calls.append(kwargs))
+    def fake_create_pull_request(**kwargs):
+        create_calls.append(kwargs)
+        return {"id": 8, "title": kwargs["title"]}
+
+    monkeypatch.setattr(service, "create_pull_request", fake_create_pull_request)
 
     service.create_pull_request_for_phase(
         _phase_result(
@@ -198,6 +276,237 @@ def test_create_pull_request_action_accepts_clean_retry_and_creates_pr(monkeypat
             "description": "Automated pull request for https://jira.example/browse/ISSUE-456",
         }
     ]
+    assert '"id": 8' in (workspace_path / "pull-request.json").read_text()
+
+
+def test_fetch_attachment_restores_open_pull_request(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(service, "get_default_branch", lambda: "main")
+    monkeypatch.setattr(
+        service,
+        "find_open_pull_request",
+        lambda source, target: {
+            "id": 9,
+            "source": {"branch": {"name": source}},
+            "destination": {"branch": {"name": target}},
+        },
+    )
+
+    content = service.fetch_attachment("ISSUE-9", "pull-request.json")
+
+    assert json.loads(content)["id"] == 9
+
+
+def test_fetch_attachment_ignores_non_bitbucket_input(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(
+        service,
+        "find_open_pull_request",
+        lambda *_args: pytest.fail("Unexpected Bitbucket request"),
+    )
+
+    assert service.fetch_attachment("ISSUE-9", "plan.md") is None
+
+
+def test_fetch_attachment_returns_active_current_pr_comments(monkeypatch):
+    service = _service()
+    pull_request = {
+        "id": 9,
+        "title": "ISSUE-9: Fix API",
+        "source": {
+            "branch": {"name": "feature/issue-9"},
+            "commit": {"hash": "current123"},
+        },
+        "destination": {"branch": {"name": "main"}},
+    }
+    monkeypatch.setattr(service, "_find_issue_pull_request", lambda _issue: pull_request)
+    monkeypatch.setattr(
+        service,
+        "list_pull_request_comments",
+        lambda _pr_id: [
+            {
+                "id": 1,
+                "content": {
+                    "raw": "Current review\n\n<!-- symphony-review:ISSUE-9:current123 -->"
+                },
+                "user": {"display_name": "Symphony"},
+                "created_on": "2026-08-11T10:00:00Z",
+            },
+            {
+                "id": 2,
+                "content": {
+                    "raw": "Old review\n\n<!-- symphony-review:ISSUE-9:old456 -->"
+                },
+            },
+            {
+                "id": 3,
+                "content": {"raw": "Please also add an HTTP-level test."},
+                "user": {"display_name": "Human Reviewer"},
+                "inline": {"path": "apps/api/src/server.ts", "to": 37},
+            },
+            {
+                "id": 4,
+                "content": {"raw": "Already resolved"},
+                "resolution": {"created_on": "2026-08-11T11:00:00Z"},
+            },
+        ],
+    )
+
+    content = service.fetch_attachment("ISSUE-9", "pull-request-comments.json")
+    payload = json.loads(content)
+
+    assert payload["pullRequest"] == {
+        "id": 9,
+        "title": "ISSUE-9: Fix API",
+        "sourceBranch": "feature/issue-9",
+        "destinationBranch": "main",
+        "sourceCommit": "current123",
+    }
+    assert [comment["id"] for comment in payload["activeComments"]] == [1, 3]
+    assert payload["activeComments"][1]["inline"] == {
+        "path": "apps/api/src/server.ts",
+        "to": 37,
+    }
+
+
+def test_list_pull_request_comments_follows_pagination(monkeypatch):
+    service = _service()
+    responses = [
+        SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {
+                "values": [{"id": 1}],
+                "next": (
+                    "https://api.bitbucket.org/2.0/repositories/acme/widgets/"
+                    "pullrequests/7/comments?page=2"
+                ),
+            },
+        ),
+        SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {"values": [{"id": 2}]},
+        ),
+    ]
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    monkeypatch.setattr(bitbucket_module.requests, "get", fake_get)
+
+    assert service.list_pull_request_comments(7) == [{"id": 1}, {"id": 2}]
+    assert calls[0][1]["params"] == {"pagelen": 100}
+    assert calls[1][1]["params"] is None
+
+
+def test_create_pull_request_comment_posts_markdown(monkeypatch):
+    service = _service()
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status_code=201,
+            text="",
+            json=lambda: {"id": 12},
+        )
+
+    monkeypatch.setattr(bitbucket_module.requests, "post", fake_post)
+
+    result = service.create_pull_request_comment(7, "## Review passed")
+
+    assert result == {"id": 12}
+    assert captured["url"].endswith("/pullrequests/7/comments")
+    assert captured["json"] == {"content": {"raw": "## Review passed"}}
+    assert captured["auth"] is service.auth
+
+
+def test_update_pull_request_comment_puts_markdown(monkeypatch):
+    service = _service()
+    captured = {}
+
+    def fake_put(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            text="",
+            json=lambda: {"id": 12},
+        )
+
+    monkeypatch.setattr(bitbucket_module.requests, "put", fake_put)
+
+    result = service.update_pull_request_comment(7, 12, "Updated review")
+
+    assert result == {"id": 12}
+    assert captured["url"].endswith("/pullrequests/7/comments/12")
+    assert captured["json"] == {"content": {"raw": "Updated review"}}
+    assert captured["auth"] is service.auth
+
+
+def test_publish_review_comment_creates_human_readable_blocked_summary(monkeypatch, tmp_path):
+    service = _service()
+    pull_request = {
+        "id": 7,
+        "source": {"commit": {"hash": "abc123"}},
+    }
+    monkeypatch.setattr(service, "_find_issue_pull_request", lambda _issue: pull_request)
+    monkeypatch.setattr(service, "list_pull_request_comments", lambda _pr_id: [])
+    captured = {}
+
+    def fake_create(pull_request_id, markdown):
+        captured["pull_request_id"] = pull_request_id
+        captured["markdown"] = markdown
+        return {"id": 22}
+
+    monkeypatch.setattr(service, "create_pull_request_comment", fake_create)
+
+    service.publish_review_comment_for_phase(_review_phase_result(tmp_path))
+
+    assert captured["pull_request_id"] == 7
+    assert "## Symphony automated review — Changes requested" in captured["markdown"]
+    assert "One reliability issue requires changes." in captured["markdown"]
+    assert "### Required changes" in captured["markdown"]
+    assert "- Return HTTP 400 for malformed request targets." in captured["markdown"]
+    assert "<!-- symphony-review:ISSUE-123:abc123 -->" in captured["markdown"]
+
+
+def test_publish_review_comment_updates_same_commit_instead_of_duplicating(monkeypatch, tmp_path):
+    service = _service()
+    marker = "<!-- symphony-review:ISSUE-123:abc123 -->"
+    monkeypatch.setattr(
+        service,
+        "_find_issue_pull_request",
+        lambda _issue: {"id": 7, "source": {"commit": {"hash": "abc123"}}},
+    )
+    monkeypatch.setattr(
+        service,
+        "list_pull_request_comments",
+        lambda _pr_id: [{"id": 20, "content": {"raw": f"Previous\n{marker}"}}],
+    )
+    updates = []
+    monkeypatch.setattr(
+        service,
+        "update_pull_request_comment",
+        lambda pr_id, comment_id, markdown: updates.append((pr_id, comment_id, markdown)),
+    )
+    monkeypatch.setattr(
+        service,
+        "create_pull_request_comment",
+        lambda *_args: pytest.fail("Retry must not create a duplicate comment"),
+    )
+
+    service.publish_review_comment_for_phase(
+        _review_phase_result(tmp_path, status="success")
+    )
+
+    assert updates[0][0:2] == (7, 20)
+    assert "Review passed" in updates[0][2]
+    assert marker in updates[0][2]
 
 
 def test_create_pull_request_action_rejects_detached_head(monkeypatch, tmp_path):

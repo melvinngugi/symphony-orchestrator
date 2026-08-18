@@ -55,7 +55,12 @@ def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypat
             tracker,
             bitbucket_service,
             action_registry,
+            execution_controller,
         ):
+            providers = execution_controller.input_provider.providers
+            assert providers[0].plan_provider is tracker
+            assert providers[0].review_provider is bitbucket_service
+            assert providers[1:] == (tracker, bitbucket_service)
             raise WorkflowValidationError(["phases.plan.states[0]: unknown Jira state 'Missing'"])
 
     monkeypatch.setattr(main, "SymphonyOrchestrator", FailingOrchestrator)
@@ -97,7 +102,12 @@ def test_lifespan_logs_state_misconfiguration_without_traceback(monkeypatch, cap
             tracker,
             bitbucket_service,
             action_registry,
+            execution_controller,
         ):
+            providers = execution_controller.input_provider.providers
+            assert providers[0].plan_provider is tracker
+            assert providers[0].review_provider is bitbucket_service
+            assert providers[1:] == (tracker, bitbucket_service)
             raise WorkflowStateValidationError(
                 [
                     "phases.plan.states[0]: unknown Jira state 'Missing'",
@@ -154,11 +164,13 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
             tracker,
             bitbucket_service,
             action_registry,
+            execution_controller,
         ):
             captured["config"] = config
             captured["tracker"] = tracker
             captured["bitbucket"] = bitbucket_service
             captured["action_registry"] = action_registry
+            captured["execution_controller"] = execution_controller
 
         def start(self):
             pass
@@ -191,6 +203,10 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
     assert captured["bitbucket"] is bitbucket
     assert captured["registered_registry"] is registry
     assert captured["action_registry"] is registry
+    providers = captured["execution_controller"].input_provider.providers
+    assert providers[0].plan_provider is tracker
+    assert providers[0].review_provider is bitbucket
+    assert providers[1:] == (tracker, bitbucket)
     assert captured["thread_daemon"] is True
     assert captured["thread_started"] is True
 
