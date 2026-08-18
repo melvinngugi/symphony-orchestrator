@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
@@ -32,6 +33,8 @@ logger = logging.getLogger("symphony.main")
 # Global reference to orchestrator for the dashboard
 global_orchestrator = None
 global_usage_collector = None
+global_orchestrator_thread = None
+global_readiness_error = None
 
 
 def ensure_symphony_home() -> None:
@@ -46,6 +49,11 @@ def ensure_symphony_home() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global global_orchestrator, global_usage_collector
+    global global_orchestrator_thread, global_readiness_error
+    global_orchestrator = None
+    global_usage_collector = None
+    global_orchestrator_thread = None
+    global_readiness_error = None
     ensure_symphony_home()
     config = load_config("WORKFLOW.md")
     try:
@@ -74,6 +82,8 @@ async def lifespan(_: FastAPI):
     except WorkflowStateValidationError as exc:
         global_orchestrator = None
         global_usage_collector = None
+        global_orchestrator_thread = None
+        global_readiness_error = "workflow_state_validation_failed"
         logger.error("%s", exc)
         yield
         return
@@ -91,8 +101,12 @@ async def lifespan(_: FastAPI):
     usage_thread.start()
 
     # Run the orchestrator loop in a separate thread so it doesn't block the dashboard API
-    daemon_thread = threading.Thread(target=global_orchestrator.start, daemon=True, name="Orchestrator")
-    daemon_thread.start()
+    global_orchestrator_thread = threading.Thread(
+        target=global_orchestrator.start,
+        daemon=True,
+        name="Orchestrator",
+    )
+    global_orchestrator_thread.start()
 
     try:
         yield
@@ -102,6 +116,34 @@ async def lifespan(_: FastAPI):
 # Initialize App & Templates
 app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="app/templates")
+
+
+@app.get("/health")
+async def health():
+    """Liveness check that has no external-service dependencies."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness():
+    """Report whether validated orchestration is initialized and running."""
+    if global_readiness_error:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "reason": global_readiness_error},
+        )
+    if global_orchestrator is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "reason": "orchestrator_not_initialized"},
+        )
+    if global_orchestrator_thread is None or not global_orchestrator_thread.is_alive():
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "reason": "orchestrator_thread_not_running"},
+        )
+    return {"status": "ready"}
+
 
 @app.get("/")
 async def dashboard(request: Request):

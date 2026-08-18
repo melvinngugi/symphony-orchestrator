@@ -49,4 +49,7 @@ RUN mkdir -p /app/workspaces /root/.codex
 
 EXPOSE 8000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=4).read()"]
+
 CMD ["python", "-m", "app.main"]

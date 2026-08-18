@@ -235,8 +235,11 @@ The `codex` executable must be available on `PATH`, and the Symphony process mus
 Build the image:
 
 ```bash
-podman build -t symphony-orchestrator:uv .
+podman build --format docker -t symphony-orchestrator:uv .
 ```
+
+Docker image format is required here because Podman's default OCI format does
+not retain the Dockerfile `HEALTHCHECK` instruction.
 
 Run the container:
 
@@ -250,11 +253,18 @@ The Codex home mounted at `/root/.codex` must contain a valid Codex login. The
 image includes the Codex CLI, Git, `agents.yaml`, and the structured-output
 schema required by the configured workflow agents.
 
-Health check:
+Liveness and readiness checks:
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
+
+`/health` returns success whenever the HTTP process is responsive and does not
+contact Jira or Bitbucket. `/ready` returns HTTP 200 only after workflow
+validation succeeds and while the orchestrator thread is running; otherwise it
+returns HTTP 503 with a non-sensitive reason code. The container health check
+uses `/ready`.
 
 If you need workspace persistence for orchestration artifacts, mount the local workspace directory:
 
