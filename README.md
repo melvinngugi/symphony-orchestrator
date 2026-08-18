@@ -233,8 +233,14 @@ podman build -t symphony-orchestrator:uv .
 Run the container:
 
 ```bash
-podman run --rm -p 8000:8000 --env-file .env symphony-orchestrator:uv
+podman run --rm -p 8000:8000 --env-file .env \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  symphony-orchestrator:uv
 ```
+
+The Codex home mounted at `/root/.codex` must contain a valid Codex login. The
+image includes the Codex CLI, Git, `agents.yaml`, and the structured-output
+schema required by the configured workflow agents.
 
 Health check:
 
@@ -246,7 +252,8 @@ If you need workspace persistence for orchestration artifacts, mount the local w
 
 ```bash
 podman run --rm -p 8000:8000 --env-file .env \
-   -v "$(pwd)/workspaces:/app/workspaces" \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  -v "$(pwd)/workspaces:/app/workspaces" \
   symphony-orchestrator:uv
 ```
 
