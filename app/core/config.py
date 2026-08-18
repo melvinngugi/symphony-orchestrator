@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     SERVER_PORT: int = int(os.getenv("SERVER_PORT", 8000))
     CODEX_USAGE_POLL_SECONDS: float = float(os.getenv("CODEX_USAGE_POLL_SECONDS", 60))
     CODEX_USAGE_STALE_SECONDS: float = float(os.getenv("CODEX_USAGE_STALE_SECONDS", 180))
+    AGENT_EXECUTION_TIMEOUT_SECONDS: float = float(os.getenv("AGENT_EXECUTION_TIMEOUT_SECONDS", 3600))
+    AGENT_TERMINATION_GRACE_SECONDS: float = float(os.getenv("AGENT_TERMINATION_GRACE_SECONDS", 10))
+    HTTP_CONNECT_TIMEOUT_SECONDS: float = float(os.getenv("HTTP_CONNECT_TIMEOUT_SECONDS", 10))
+    HTTP_READ_TIMEOUT_SECONDS: float = float(os.getenv("HTTP_READ_TIMEOUT_SECONDS", 60))
+    GIT_COMMAND_TIMEOUT_SECONDS: float = float(os.getenv("GIT_COMMAND_TIMEOUT_SECONDS", 300))
     
     # Jira Settings
     JIRA_HOST: str = os.getenv("JIRA_HOST", "")

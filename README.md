@@ -193,6 +193,14 @@ reachable from a particular issue state remains a runtime concern.
    BITBUCKET_USER_EMAIL="your-email@domain.com"
    BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
 
+   # Runtime timeout limits (seconds)
+   AGENT_EXECUTION_TIMEOUT_SECONDS=3600
+   AGENT_TERMINATION_GRACE_SECONDS=10
+   HTTP_CONNECT_TIMEOUT_SECONDS=10
+   HTTP_READ_TIMEOUT_SECONDS=60
+   GIT_COMMAND_TIMEOUT_SECONDS=300
+   ```
+
 ## Running the Orchestrator
 
 Start the FastAPI application and background orchestrator daemon:
@@ -227,26 +235,43 @@ The `codex` executable must be available on `PATH`, and the Symphony process mus
 Build the image:
 
 ```bash
-podman build -t symphony-orchestrator:uv .
+podman build --format docker -t symphony-orchestrator:uv .
 ```
+
+Docker image format is required here because Podman's default OCI format does
+not retain the Dockerfile `HEALTHCHECK` instruction.
 
 Run the container:
 
 ```bash
-podman run --rm -p 8000:8000 --env-file .env symphony-orchestrator:uv
+podman run --rm -p 8000:8000 --env-file .env \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  symphony-orchestrator:uv
 ```
 
-Health check:
+The Codex home mounted at `/root/.codex` must contain a valid Codex login. The
+image includes the Codex CLI, Git, `agents.yaml`, and the structured-output
+schema required by the configured workflow agents.
+
+Liveness and readiness checks:
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
+
+`/health` returns success whenever the HTTP process is responsive and does not
+contact Jira or Bitbucket. `/ready` returns HTTP 200 only after workflow
+validation succeeds and while the orchestrator thread is running; otherwise it
+returns HTTP 503 with a non-sensitive reason code. The container health check
+uses `/ready`.
 
 If you need workspace persistence for orchestration artifacts, mount the local workspace directory:
 
 ```bash
 podman run --rm -p 8000:8000 --env-file .env \
-   -v "$(pwd)/workspaces:/app/workspaces" \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  -v "$(pwd)/workspaces:/app/workspaces" \
   symphony-orchestrator:uv
 ```
 

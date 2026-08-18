@@ -64,10 +64,11 @@ def test_attach_outputs_posts_all_files_in_one_multipart_request(monkeypatch, tm
     (nested / "blob.unknownext").write_bytes(b"\x00\x01")
     captured = {}
 
-    def fake_post(url, headers, auth, files):
+    def fake_post(url, headers, auth, files, timeout):
         captured["url"] = url
         captured["headers"] = headers
         captured["auth"] = auth
+        captured["timeout"] = timeout
         captured["files"] = [
             (field, name, handle.read(), content_type)
             for field, (name, handle, content_type) in files
@@ -85,6 +86,7 @@ def test_attach_outputs_posts_all_files_in_one_multipart_request(monkeypatch, tm
     )
 
     assert captured["url"].endswith("/rest/api/3/issue/ABC-123/attachments")
+    assert captured["timeout"] == client.request_timeout
     assert captured["headers"] == {
         "Accept": "application/json",
         "X-Atlassian-Token": "no-check",

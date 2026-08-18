@@ -60,11 +60,19 @@ def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
             "--quiet",
             "refs/remotes/origin/feature/issue-123",
         ],
-        {"cwd": str(repository_path), "check": False},
+        {
+            "cwd": str(repository_path),
+            "check": False,
+            "timeout": service.git_timeout,
+        },
     )
     assert calls[2] == (
         ["git", "checkout", "-b", "feature/issue-123"],
-        {"cwd": str(repository_path), "check": True},
+        {
+            "cwd": str(repository_path),
+            "check": True,
+            "timeout": service.git_timeout,
+        },
     )
 
 
@@ -92,7 +100,11 @@ def test_prepare_workspace_checks_out_existing_remote_issue_branch(monkeypatch, 
             "feature/issue-123",
             "origin/feature/issue-123",
         ],
-        {"cwd": str(tmp_path / "ISSUE-123" / "repository"), "check": True},
+        {
+            "cwd": str(tmp_path / "ISSUE-123" / "repository"),
+            "check": True,
+            "timeout": service.git_timeout,
+        },
     )
 
 
@@ -400,6 +412,8 @@ def test_list_pull_request_comments_follows_pagination(monkeypatch):
     assert service.list_pull_request_comments(7) == [{"id": 1}, {"id": 2}]
     assert calls[0][1]["params"] == {"pagelen": 100}
     assert calls[1][1]["params"] is None
+    assert calls[0][1]["timeout"] == service.request_timeout
+    assert calls[1][1]["timeout"] == service.request_timeout
 
 
 def test_create_pull_request_comment_posts_markdown(monkeypatch):
