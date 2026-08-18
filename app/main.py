@@ -67,6 +67,8 @@ async def lifespan(_: FastAPI):
                 input_provider=FallbackAgentInputProvider(
                     (implementation_context_provider, tracker, bitbucket)
                 ),
+                execution_timeout_seconds=settings.AGENT_EXECUTION_TIMEOUT_SECONDS,
+                termination_grace_seconds=settings.AGENT_TERMINATION_GRACE_SECONDS,
             ),
         )
     except WorkflowStateValidationError as exc:

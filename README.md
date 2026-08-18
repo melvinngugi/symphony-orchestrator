@@ -193,6 +193,14 @@ reachable from a particular issue state remains a runtime concern.
    BITBUCKET_USER_EMAIL="your-email@domain.com"
    BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
 
+   # Runtime timeout limits (seconds)
+   AGENT_EXECUTION_TIMEOUT_SECONDS=3600
+   AGENT_TERMINATION_GRACE_SECONDS=10
+   HTTP_CONNECT_TIMEOUT_SECONDS=10
+   HTTP_READ_TIMEOUT_SECONDS=60
+   GIT_COMMAND_TIMEOUT_SECONDS=300
+   ```
+
 ## Running the Orchestrator
 
 Start the FastAPI application and background orchestrator daemon:

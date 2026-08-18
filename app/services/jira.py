@@ -21,6 +21,10 @@ class JiraClient:
         self.auth = HTTPBasicAuth(settings.JIRA_USER_EMAIL, settings.JIRA_API_TOKEN)
         self.headers = {"Accept": "application/json"}
         self.base_url = settings.JIRA_HOST.rstrip("/")
+        self.request_timeout = (
+            settings.HTTP_CONNECT_TIMEOUT_SECONDS,
+            settings.HTTP_READ_TIMEOUT_SECONDS,
+        )
 
     def register_actions(self, registry: ActionRegistry) -> None:
         """Register Jira-owned transition actions."""
@@ -62,6 +66,7 @@ class JiraClient:
                     headers=headers,
                     auth=self.auth,
                     files=files,
+                    timeout=self.request_timeout,
                 )
             except requests.RequestException as exc:
                 raise RuntimeError(f"Jira attachment request failed: {exc}") from exc
@@ -93,6 +98,7 @@ class JiraClient:
                 headers=self.headers,
                 auth=self.auth,
                 params={"fields": "attachment"},
+                timeout=self.request_timeout,
             )
         except requests.RequestException as exc:
             raise RuntimeError(f"Jira attachment metadata request failed: {exc}") from exc
@@ -141,6 +147,7 @@ class JiraClient:
                 headers=self.headers,
                 auth=self.auth,
                 params={"redirect": "false"},
+                timeout=self.request_timeout,
             )
         except requests.RequestException as exc:
             raise RuntimeError(f"Jira attachment content request failed: {exc}") from exc
@@ -193,6 +200,7 @@ class JiraClient:
                     headers=self.headers,
                     auth=self.auth,
                     params=params,
+                    timeout=self.request_timeout,
                 )
             except requests.RequestException as exc:
                 raise RuntimeError(f"Jira status search request failed: {exc}") from exc
@@ -254,7 +262,12 @@ class JiraClient:
         project_key = quote(settings.JIRA_PROJECT_KEY, safe="")
         url = f"{self.base_url}/rest/api/3/project/{project_key}"
         try:
-            response = requests.get(url, headers=self.headers, auth=self.auth)
+            response = requests.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                timeout=self.request_timeout,
+            )
         except requests.RequestException as exc:
             raise RuntimeError(f"Jira project lookup request failed: {exc}") from exc
 
@@ -341,7 +354,13 @@ class JiraClient:
             "fields": "summary,description,priority,status,labels,created,updated"
         }
         
-        response = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+        response = requests.get(
+            url,
+            headers=self.headers,
+            auth=self.auth,
+            params=params,
+            timeout=self.request_timeout,
+        )
         if response.status_code != 200:
             print(f"Jira API Candidate Fetch Error: {response.status_code} - {response.text}")
             return []
@@ -361,7 +380,13 @@ class JiraClient:
         url = f"{self.base_url}/rest/api/3/search/jql"
         params = {"jql": jql, "fields": "status,summary,description,priority,labels,created,updated"}
         
-        response = requests.get(url, headers=self.headers, auth=self.auth, params=params)
+        response = requests.get(
+            url,
+            headers=self.headers,
+            auth=self.auth,
+            params=params,
+            timeout=self.request_timeout,
+        )
         if response.status_code != 200:
             return []
             
@@ -379,7 +404,12 @@ class JiraClient:
         # Use self.base_url and self.auth which are already configured in __init__
         transitions_url = f"{self.base_url}/rest/api/3/issue/{issue_identifier}/transitions"
         
-        response = requests.get(transitions_url, headers=headers, auth=self.auth)
+        response = requests.get(
+            transitions_url,
+            headers=headers,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
         if response.status_code != 200:
             print(f"Failed to fetch transitions for {issue_identifier}: {response.text}")
             return False
@@ -402,7 +432,13 @@ class JiraClient:
         payload = {"transition": {"id": transition_id}}
         
         print(f"Transitioning {issue_identifier} to '{target_state}' (ID: {transition_id})...")
-        post_response = requests.post(transitions_url, headers=headers, auth=self.auth, json=payload)
+        post_response = requests.post(
+            transitions_url,
+            headers=headers,
+            auth=self.auth,
+            json=payload,
+            timeout=self.request_timeout,
+        )
         
         if post_response.status_code == 204:
             print(f"Successfully updated {issue_identifier} to '{target_state}'!")
@@ -421,7 +457,13 @@ class JiraClient:
         comments_url = f"{self.base_url}/rest/api/3/issue/{issue_identifier}/comment"
         payload = {"body": self._build_adf_comment(body)}
 
-        response = requests.post(comments_url, headers=headers, auth=self.auth, json=payload)
+        response = requests.post(
+            comments_url,
+            headers=headers,
+            auth=self.auth,
+            json=payload,
+            timeout=self.request_timeout,
+        )
         if response.status_code in (200, 201):
             print(f"Successfully added comment to {issue_identifier}!")
             return True

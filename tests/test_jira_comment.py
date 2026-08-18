@@ -12,11 +12,12 @@ def test_add_comment_posts_adf_payload(monkeypatch):
 
     captured = {}
 
-    def fake_post(url, headers, auth, json):
+    def fake_post(url, headers, auth, json, timeout):
         captured["url"] = url
         captured["headers"] = headers
         captured["auth"] = auth
         captured["json"] = json
+        captured["timeout"] = timeout
         return SimpleNamespace(status_code=201, text="")
 
     monkeypatch.setattr(jira_module.requests, "post", fake_post)
@@ -29,6 +30,7 @@ def test_add_comment_posts_adf_payload(monkeypatch):
     assert success is True
     assert captured["url"] == "https://example.atlassian.net/rest/api/3/issue/ABC-123/comment"
     assert captured["headers"]["Content-Type"] == "application/json"
+    assert captured["timeout"] == client.request_timeout
 
     adf = captured["json"]["body"]
     assert adf["type"] == "doc"
@@ -48,8 +50,9 @@ def test_add_comment_supports_jira_markdown_star_bullets(monkeypatch):
 
     captured = {}
 
-    def fake_post(url, headers, auth, json):
+    def fake_post(url, headers, auth, json, timeout):
         captured["json"] = json
+        captured["timeout"] = timeout
         return SimpleNamespace(status_code=201, text="")
 
     monkeypatch.setattr(jira_module.requests, "post", fake_post)
@@ -60,6 +63,7 @@ def test_add_comment_supports_jira_markdown_star_bullets(monkeypatch):
     success = client.add_comment(issue_identifier="ABC-123", body=comment)
 
     assert success is True
+    assert captured["timeout"] == client.request_timeout
     adf = captured["json"]["body"]
     assert adf["content"][1]["type"] == "bulletList"
     assert adf["content"][1]["content"][0]["content"][0]["content"][0]["text"] == "first item"

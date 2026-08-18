@@ -4,6 +4,8 @@ import os
 import re
 import json
 import base64
+import signal
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional, Protocol
 
@@ -29,6 +31,8 @@ class RunningAgentExecution:
     structured_output_file: Optional[str]
     required_outputs: dict[str, list[str]]
     process: subprocess.Popen
+    stdout_path: str
+    started_at: float
 
 
 @dataclass
@@ -141,8 +145,19 @@ class SubprocessAgentExecutionController:
         "SSL_CERT_DIR",
     )
 
-    def __init__(self, input_provider: AgentInputProvider | None = None):
+    def __init__(
+        self,
+        input_provider: AgentInputProvider | None = None,
+        execution_timeout_seconds: float = 3600,
+        termination_grace_seconds: float = 10,
+    ):
+        if execution_timeout_seconds <= 0:
+            raise ValueError("Agent execution timeout must be greater than zero")
+        if termination_grace_seconds <= 0:
+            raise ValueError("Agent termination grace period must be greater than zero")
         self.input_provider = input_provider
+        self.execution_timeout_seconds = execution_timeout_seconds
+        self.termination_grace_seconds = termination_grace_seconds
 
     def start_execution(self, request: AgentExecutionRequest) -> RunningAgentExecution:
         if not request.agent_config.command:
@@ -165,17 +180,23 @@ class SubprocessAgentExecutionController:
         with open(log_file_path, "w") as f:
             f.write(f"{' '.join(full_command)}\n")
 
+        stdout_path = self._stdout_file_path(request.workspace_path, request.agent_name)
+        stdout_file = open(stdout_path, "w")
         stderr_file = open(log_file_path, "a")
-        process = subprocess.Popen(
-            full_command,
-            cwd=request.repository_path,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr_file,
-            text=True,
-            env=env,
-        )
-        stderr_file.close()
+        try:
+            process = subprocess.Popen(
+                full_command,
+                cwd=request.repository_path,
+                stdin=subprocess.PIPE,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+                env=env,
+                start_new_session=True,
+            )
+        finally:
+            stdout_file.close()
+            stderr_file.close()
 
         if process.stdin:
             if stdin_content:
@@ -190,14 +211,34 @@ class SubprocessAgentExecutionController:
             structured_output_file=request.agent_config.structured,
             required_outputs=request.agent_config.required_outputs,
             process=process,
+            stdout_path=stdout_path,
+            started_at=time.monotonic(),
         )
 
     def poll_execution(self, execution: RunningAgentExecution) -> Optional[AgentExecutionResult]:
         exit_code = execution.process.poll()
         if exit_code is None:
-            return None
+            elapsed = time.monotonic() - execution.started_at
+            if elapsed < self.execution_timeout_seconds:
+                return None
+            self._terminate_process(execution.process)
+            stdout_content = self._read_stdout_content(execution.stdout_path)
+            stderr_content = self._read_stderr_content(
+                execution.workspace_path,
+                execution.agent_name,
+            )
+            timeout_message = (
+                f"Agent execution timed out after {self.execution_timeout_seconds:g} seconds"
+            )
+            return AgentExecutionResult(
+                exit_code=124,
+                stdout=stdout_content,
+                stderr=f"{stderr_content}\n{timeout_message}".strip(),
+                status="failed",
+                files=[],
+            )
 
-        stdout_content, _ = execution.process.communicate()
+        stdout_content = self._read_stdout_content(execution.stdout_path)
         stderr_content = self._read_stderr_content(execution.workspace_path, execution.agent_name)
 
         status = "success"
@@ -475,8 +516,44 @@ class SubprocessAgentExecutionController:
             logger.error(f"Failed to read stderr from {log_file_path}: {e}")
             return ""
 
+    def _read_stdout_content(self, stdout_path: str) -> str:
+        try:
+            with open(stdout_path, "r") as output_file:
+                return output_file.read()
+        except OSError as exc:
+            logger.error("Failed to read agent stdout from %s: %s", stdout_path, exc)
+            return ""
+
+    def _terminate_process(self, process: subprocess.Popen) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except (AttributeError, OSError):
+            process.terminate()
+
+        try:
+            process.wait(timeout=self.termination_grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except (AttributeError, OSError):
+            process.kill()
+        try:
+            process.wait(timeout=self.termination_grace_seconds)
+        except subprocess.TimeoutExpired:
+            logger.error("Agent process did not exit after SIGKILL")
+
     def _log_file_path(self, workspace_path: str, agent_name: str) -> str:
         return os.path.join(workspace_path, "log", f"{agent_name}.log")
+
+    def _stdout_file_path(self, workspace_path: str, agent_name: str) -> str:
+        return os.path.join(workspace_path, "log", f"{agent_name}.stdout")
 
 
 # Backward-compatible alias for existing imports/usages.

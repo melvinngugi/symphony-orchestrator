@@ -32,7 +32,8 @@ def test_fetch_project_status_names_resolves_project_and_paginates(monkeypatch):
     client = _client(monkeypatch)
     calls = []
 
-    def fake_get(url, headers, auth, params=None):
+    def fake_get(url, headers, auth, params=None, timeout=None):
+        assert timeout == client.request_timeout
         calls.append((url, headers, auth, params))
         if url.endswith("/rest/api/3/project/SHOP%20SPACE"):
             return _response({"id": "10001"})

@@ -1,5 +1,7 @@
 import base64
 import json
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -551,6 +553,75 @@ def test_start_execution_runs_in_repository_and_keeps_artifacts_in_workspace(mon
     assert (workspace_path / "log" / "planner.log").is_file()
     assert not (repository_path / "issue.json").exists()
     assert not (repository_path / "log").exists()
+
+
+def test_agent_stdout_is_drained_without_pipe_deadlock(tmp_path):
+    workspace_path = tmp_path / "ISSUE-OUTPUT"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    (workspace_path / "issue.json").write_text("{}")
+    output_size = 1_000_000
+    controller = SubprocessAgentExecutionController(execution_timeout_seconds=5)
+
+    execution = controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="writer",
+            issue={"id": "1"},
+            agent_config=AgentConfig(
+                command=sys.executable,
+                args=["-c", f"print('x' * {output_size}, end='')"],
+                stdin="issue.json",
+                output_file="report.txt",
+            ),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+
+    result = None
+    deadline = time.monotonic() + 5
+    while result is None and time.monotonic() < deadline:
+        result = controller.poll_execution(execution)
+        time.sleep(0.01)
+
+    assert result is not None
+    assert result.exit_code == 0
+    assert len(result.stdout) == output_size
+    assert (workspace_path / "report.txt").stat().st_size == output_size
+
+
+def test_agent_execution_timeout_terminates_process(tmp_path):
+    workspace_path = tmp_path / "ISSUE-TIMEOUT"
+    repository_path = workspace_path / "repository"
+    repository_path.mkdir(parents=True)
+    (workspace_path / "issue.json").write_text("{}")
+    controller = SubprocessAgentExecutionController(
+        execution_timeout_seconds=0.05,
+        termination_grace_seconds=0.05,
+    )
+
+    execution = controller.start_execution(
+        AgentExecutionRequest(
+            agent_name="sleeper",
+            issue={"id": "1"},
+            agent_config=AgentConfig(
+                command=sys.executable,
+                args=["-c", "import time; time.sleep(30)"],
+                stdin="issue.json",
+            ),
+            workspace_path=str(workspace_path),
+            repository_path=str(repository_path),
+        )
+    )
+    time.sleep(0.1)
+
+    result = controller.poll_execution(execution)
+
+    assert result is not None
+    assert result.exit_code == 124
+    assert result.status == "failed"
+    assert "timed out after 0.05 seconds" in result.stderr
+    assert execution.process.poll() is not None
 
 
 def test_read_stderr_returns_tail_and_points_to_full_log(tmp_path):

@@ -13,6 +13,11 @@ from app.services.actions import ActionRegistry, PhaseResult
 logger = logging.getLogger("symphony.bitbucket")
 
 class BitbucketService:
+    request_timeout = (
+        settings.HTTP_CONNECT_TIMEOUT_SECONDS,
+        settings.HTTP_READ_TIMEOUT_SECONDS,
+    )
+    git_timeout = settings.GIT_COMMAND_TIMEOUT_SECONDS
     _REVIEW_MARKER_PATTERN = re.compile(
         r"<!--\s*symphony-review:([^:>]+):([0-9A-Za-z._-]+)\s*-->"
     )
@@ -24,6 +29,11 @@ class BitbucketService:
         self.auth = HTTPBasicAuth(settings.BITBUCKET_USER_EMAIL, settings.BITBUCKET_API_TOKEN)
         self.base_url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace}/{self.repo_slug}"
         self.base_workdir = "/tmp/symphony_workspaces"
+        self.request_timeout = (
+            settings.HTTP_CONNECT_TIMEOUT_SECONDS,
+            settings.HTTP_READ_TIMEOUT_SECONDS,
+        )
+        self.git_timeout = settings.GIT_COMMAND_TIMEOUT_SECONDS
         
         os.makedirs(self.base_workdir, exist_ok=True)
 
@@ -54,9 +64,17 @@ class BitbucketService:
             self.publish_review_comment_for_phase,
         )
 
+    def _run_git(self, command: list[str], **kwargs) -> subprocess.CompletedProcess:
+        """Run one Git command with the configured upper time bound."""
+        return subprocess.run(command, timeout=self.git_timeout, **kwargs)
+
     def verify_repository(self) -> dict:
         """Verifies access to the target Bitbucket repository."""
-        response = requests.get(self.base_url, auth=self.auth)
+        response = requests.get(
+            self.base_url,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
         if response.status_code != 200:
             raise Exception(f"Bitbucket Connection Error ({response.status_code}): {response.text}")
         return response.json()
@@ -89,7 +107,7 @@ class BitbucketService:
         logger.info(f"Cloning {self.repo_slug} into isolated checkout: {checkout_path}")
         
         # Clone the repository
-        subprocess.run(
+        self._run_git(
             ["git", "clone", repo_url, checkout_path],
             check=True,
             env=self._git_auth_env(),
@@ -98,19 +116,19 @@ class BitbucketService:
         # Reuse a previously pushed issue branch when resuming on a fresh host.
         branch_name = f"feature/{identifier.lower()}"
         remote_branch = f"refs/remotes/origin/{branch_name}"
-        remote_exists = subprocess.run(
+        remote_exists = self._run_git(
             ["git", "show-ref", "--verify", "--quiet", remote_branch],
             cwd=checkout_path,
             check=False,
         )
         if remote_exists.returncode == 0:
-            subprocess.run(
+            self._run_git(
                 ["git", "checkout", "--track", "-b", branch_name, f"origin/{branch_name}"],
                 cwd=checkout_path,
                 check=True,
             )
         elif remote_exists.returncode == 1:
-            subprocess.run(["git", "checkout", "-b", branch_name], cwd=checkout_path, check=True)
+            self._run_git(["git", "checkout", "-b", branch_name], cwd=checkout_path, check=True)
         else:
             raise subprocess.CalledProcessError(
                 remote_exists.returncode,
@@ -134,7 +152,13 @@ class BitbucketService:
         }
         headers = {"Content-Type": "application/json"}
         
-        response = requests.post(url, json=payload, headers=headers, auth=self.auth)
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
         if response.status_code not in (200, 201):
             raise Exception(f"Failed to create PR ({response.status_code}): {response.text}")
         payload = response.json()
@@ -155,7 +179,12 @@ class BitbucketService:
             if not url.startswith(pull_requests_url):
                 raise ValueError("Bitbucket pull request list response has an invalid next link")
             visited_urls.add(url)
-            response = requests.get(url, params=params, auth=self.auth)
+            response = requests.get(
+                url,
+                params=params,
+                auth=self.auth,
+                timeout=self.request_timeout,
+            )
             if response.status_code != 200:
                 raise RuntimeError(
                     f"Failed to list pull requests ({response.status_code}): {response.text}"
@@ -221,7 +250,12 @@ class BitbucketService:
                 raise ValueError("Bitbucket pull request comments response has an invalid next link")
             visited_urls.add(url)
 
-            response = requests.get(url, params=params, auth=self.auth)
+            response = requests.get(
+                url,
+                params=params,
+                auth=self.auth,
+                timeout=self.request_timeout,
+            )
             if response.status_code != 200:
                 raise RuntimeError(
                     f"Failed to list pull request comments ({response.status_code}): "
@@ -249,6 +283,7 @@ class BitbucketService:
             json={"content": {"raw": markdown}},
             headers={"Content-Type": "application/json"},
             auth=self.auth,
+            timeout=self.request_timeout,
         )
         if response.status_code != 201:
             raise RuntimeError(
@@ -272,6 +307,7 @@ class BitbucketService:
             json={"content": {"raw": markdown}},
             headers={"Content-Type": "application/json"},
             auth=self.auth,
+            timeout=self.request_timeout,
         )
         if response.status_code != 200:
             raise RuntimeError(
@@ -335,7 +371,7 @@ class BitbucketService:
         if isinstance(commit_hash, str) and commit_hash.strip():
             return commit_hash.strip()
 
-        result = subprocess.run(
+        result = self._run_git(
             ["git", "rev-parse", "HEAD"],
             cwd=checkout_path,
             check=True,
@@ -449,15 +485,15 @@ class BitbucketService:
         issue_title = str(issue.get("title") or "Automated changes").strip()
         pull_request_title = f"{issue_key}: {issue_title}"
 
-        subprocess.run(["git", "add", "--all"], cwd=checkout_path, check=True)
-        staged = subprocess.run(
+        self._run_git(["git", "add", "--all"], cwd=checkout_path, check=True)
+        staged = self._run_git(
             ["git", "diff", "--cached", "--quiet"],
             cwd=checkout_path,
             check=False,
         )
         if staged.returncode == 1:
             author_email = settings.BITBUCKET_USER_EMAIL or "symphony@localhost"
-            subprocess.run(
+            self._run_git(
                 [
                     "git",
                     "-c",
@@ -477,7 +513,7 @@ class BitbucketService:
                 ["git", "diff", "--cached", "--quiet"],
             )
 
-        branch_result = subprocess.run(
+        branch_result = self._run_git(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=checkout_path,
             check=True,
@@ -488,7 +524,7 @@ class BitbucketService:
         if not source_branch or source_branch == "HEAD":
             raise RuntimeError("Cannot create a pull request from a detached HEAD")
 
-        subprocess.run(
+        self._run_git(
             ["git", "push", "--set-upstream", "origin", source_branch],
             cwd=checkout_path,
             check=True,
