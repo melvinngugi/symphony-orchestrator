@@ -9,7 +9,7 @@ By using intelligent, multi-stage agents, Symphony parses repository execution c
 - **Specification-Driven Orchestration**: Implements OpenAI's architectural concepts to translate repository contracts into deterministic agent actions.
 - **Jira Backlog Tracking Client**: Synchronizes with Jira Cloud APIs via JQL to identify, filter, and dispatch candidate issues tagged for AI execution.
 - **Bitbucket VCS Integration**: Authenticates via scoped API tokens to clone repositories, isolate workspaces per ticket, check out feature branches, and submit Pull Requests.
-- **Isolated Workspace Management**: Creates clean, isolated execution sandboxes (`/tmp/symphony_workspaces/<TICKET-ID>`) for safe agent code generation and testing.
+- **Isolated Workspace Management**: Creates clean, isolated execution sandboxes (`<WORKSPACE_ROOT>/<TICKET-ID>`) for safe agent code generation and testing.
 - **Multi-Stage Agent Pipeline**: Features a modular pipeline architecture (`symphony.agent`) to analyze codebase context, generate targeted patches, and verify changes before committing.
 - **Core Domain Normalization**: Converts raw external vendor payloads (Jira/Bitbucket) into a unified, stable internal domain model.
 - **Structured Agent Routing**: Agents can emit structured JSON results that drive workflow routing, artifact extraction, and blocked-queue handling.
@@ -20,7 +20,7 @@ Each Jira issue gets an issue-level workspace for Symphony execution artifacts a
 a nested Git checkout containing only repository files and task changes:
 
 ```text
-/tmp/symphony_workspaces/ISSUE-123/
+<WORKSPACE_ROOT>/ISSUE-123/
 ├── issue.json
 ├── plan.md
 ├── implementer-result.json
@@ -192,6 +192,9 @@ reachable from a particular issue state remains a runtime concern.
    BITBUCKET_REPO_SLUG="your-repo"
    BITBUCKET_USER_EMAIL="your-email@domain.com"
    BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
+
+   # Workspace Configuration
+   WORKSPACE_ROOT="./workspaces"
 
    # Runtime timeout limits (seconds)
    AGENT_EXECUTION_TIMEOUT_SECONDS=3600

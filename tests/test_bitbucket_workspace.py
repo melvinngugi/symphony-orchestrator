@@ -15,6 +15,20 @@ def test_repository_path_uses_fixed_child(tmp_path):
     assert repository_path(str(tmp_path / "ISSUE-1")) == str(tmp_path / "ISSUE-1" / "repository")
 
 
+def test_service_uses_configured_workspace_root(monkeypatch, tmp_path):
+    workspace_root = tmp_path / "configured-workspaces"
+    monkeypatch.setattr(bitbucket_module.settings, "WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_WORKSPACE", "acme")
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_REPO_SLUG", "widgets")
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_USER_EMAIL", "bot@example.com")
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_API_TOKEN", "test-token")
+
+    service = BitbucketService()
+
+    assert service.base_workdir == str(workspace_root)
+    assert workspace_root.is_dir()
+
+
 def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):
     service = BitbucketService.__new__(BitbucketService)
     service.base_workdir = str(tmp_path)
