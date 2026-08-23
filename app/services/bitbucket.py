@@ -28,7 +28,7 @@ class BitbucketService:
         self.repo_slug = settings.BITBUCKET_REPO_SLUG
         self.auth = HTTPBasicAuth(settings.BITBUCKET_USER_EMAIL, settings.BITBUCKET_API_TOKEN)
         self.base_url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace}/{self.repo_slug}"
-        self.base_workdir = "/tmp/symphony_workspaces"
+        self.base_workdir = settings.WORKSPACE_ROOT
         self.request_timeout = (
             settings.HTTP_CONNECT_TIMEOUT_SECONDS,
             settings.HTTP_READ_TIMEOUT_SECONDS,
