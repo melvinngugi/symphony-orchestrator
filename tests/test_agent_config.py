@@ -1,7 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import load_agents_config, load_config
+from app.core.config import (
+    WorkflowConfigLoadError,
+    load_agents_config,
+    load_config,
+)
 from app.models.agent_config import AgentConfig
 
 
@@ -29,6 +33,51 @@ agents:
 
     with pytest.raises(ValueError, match="Structured agent 'broken'"):
         load_agents_config(str(config_path))
+
+
+def test_load_config_accepts_alternate_workflow_path(tmp_path):
+    workflow_path = tmp_path / "custom-workflow.md"
+    workflow_path.write_text("---\nphases:\n  custom: {}\n---\n# Custom workflow\n")
+
+    assert load_config(str(workflow_path)) == {"phases": {"custom": {}}}
+
+
+def test_load_config_rejects_missing_workflow(tmp_path):
+    workflow_path = tmp_path / "missing-workflow.md"
+
+    with pytest.raises(WorkflowConfigLoadError, match=str(workflow_path)):
+        load_config(str(workflow_path))
+
+
+def test_load_config_rejects_unreadable_workflow(monkeypatch, tmp_path):
+    workflow_path = tmp_path / "unreadable-workflow.md"
+    workflow_path.write_text("---\nphases: {}\n---\n")
+
+    def deny_read(path, mode):
+        assert path == str(workflow_path)
+        assert mode == "r"
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("builtins.open", deny_read)
+
+    with pytest.raises(WorkflowConfigLoadError, match="permission denied"):
+        load_config(str(workflow_path))
+
+
+def test_load_config_rejects_malformed_yaml(tmp_path):
+    workflow_path = tmp_path / "malformed-workflow.md"
+    workflow_path.write_text("---\nphases: [\n---\n")
+
+    with pytest.raises(WorkflowConfigLoadError, match="invalid YAML"):
+        load_config(str(workflow_path))
+
+
+def test_load_config_rejects_empty_front_matter(tmp_path):
+    workflow_path = tmp_path / "empty-workflow.md"
+    workflow_path.write_text("---\n---\n# Empty workflow\n")
+
+    with pytest.raises(WorkflowConfigLoadError, match="must not be empty"):
+        load_config(str(workflow_path))
 
 
 def test_reviewer_routes_required_changes_to_clarification_needed():

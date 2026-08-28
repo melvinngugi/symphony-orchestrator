@@ -45,7 +45,7 @@ When `structured` is set:
 - If `status == "success"`, a later Jira poll dispatches the phase whose `states` contain the issue's new Jira state.
 - If `status == "blocked"`, the issue is moved to the orchestrator blocked queue and follows the phase's blocked transition.
 
-Phase-level Jira transitions for structured outcomes are configured in `WORKFLOW.md` under each phase:
+Phase-level Jira transitions for structured outcomes are configured in the selected workflow file under each phase:
 
 ```yaml
 phases:
@@ -135,9 +135,10 @@ project, including global statuses used by company-managed workflows. The Jira u
 must have the Administer Projects permission for the project or the Administer Jira
 global permission required by the status search API.
 
-Validation loads project statuses from Jira during every startup. If a configured
-state name is unavailable, Symphony logs the incorrect state and the available Jira
-states without a stack trace; the dashboard remains available but the orchestrator
+Validation loads the selected workflow and project statuses from Jira during every
+startup. If a configured state name is unavailable, Symphony logs the incorrect
+state and the available Jira states without a stack trace; the dashboard remains
+available but the orchestrator
 does not start. Other invalid workflow configuration, unavailable Jira credentials
 or connectivity, and malformed or empty status responses remain fatal startup
 errors. State existence is validated; whether a specific Jira transition is
@@ -196,6 +197,9 @@ reachable from a particular issue state remains a runtime concern.
    # Workspace Configuration
    WORKSPACE_ROOT="./workspaces"
 
+   # Optional workflow definition (defaults to WORKFLOW.md)
+   WORKFLOW_PATH="WORKFLOW.md"
+
    # Runtime timeout limits (seconds)
    AGENT_EXECUTION_TIMEOUT_SECONDS=3600
    AGENT_TERMINATION_GRACE_SECONDS=10
@@ -211,6 +215,32 @@ Start the FastAPI application and background orchestrator daemon:
    ```bash
    python -m app.main
    ```
+
+By default Symphony loads `WORKFLOW.md` from the process working directory. An
+alternate Markdown workflow can be selected with `--workflow`:
+
+```bash
+python -m app.main --workflow WORKFLOW-deltaflow.md
+```
+
+It can also be selected through the environment, including when the FastAPI app
+is launched directly through Uvicorn:
+
+```bash
+WORKFLOW_PATH=WORKFLOW-deltaflow.md python -m app.main
+WORKFLOW_PATH=WORKFLOW-deltaflow.md uvicorn app.main:app
+```
+
+`--workflow` takes precedence over `WORKFLOW_PATH`; if neither is provided,
+`WORKFLOW.md` is used. Relative paths are resolved from the process working
+directory. The selected file must exist, be readable, and contain valid YAML
+front matter or startup fails without falling back to the default.
+
+Enable debug-level application logging with:
+
+```bash
+python -m app.main --debug
+```
 
 The orchestrator will continuously poll Jira for candidate issues (e.g., tickets with the AI label in To Do), set up an isolated Bitbucket workspace, and trigger the agent pipeline.
 
@@ -255,6 +285,28 @@ podman run --rm -p 8000:8000 --env-file .env \
 The Codex home mounted at `/root/.codex` must contain a valid Codex login. The
 image includes the Codex CLI, Git, `agents.yaml`, and the structured-output
 schema required by the configured workflow agents.
+
+To use an alternate workflow in the container, mount it read-only and set its
+container path through `WORKFLOW_PATH`:
+
+```bash
+podman run --rm -p 8000:8000 --env-file .env \
+  -e WORKFLOW_PATH=/config/custom-workflow.md \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  -v "$(pwd)/WORKFLOW-deltaflow.md:/config/custom-workflow.md:ro" \
+  symphony-orchestrator:uv
+```
+
+The same mounted file can be selected with the CLI flag by overriding the image
+command:
+
+```bash
+podman run --rm -p 8000:8000 --env-file .env \
+  -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
+  -v "$(pwd)/WORKFLOW-deltaflow.md:/config/custom-workflow.md:ro" \
+  symphony-orchestrator:uv \
+  python -m app.main --workflow /config/custom-workflow.md
+```
 
 Liveness and readiness checks:
 

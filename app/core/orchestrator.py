@@ -64,8 +64,11 @@ class SymphonyOrchestrator:
 
     def start(self):
         logger.info("Starting Symphony Orchestrator daemon...")
+        round=0
         while True:
+            round=round+1
             try:
+                logger.debug(f"Tick round {round}")
                 self._reconcile_pending_transitions()
                 self._reconcile_running_tasks()
                 self._tick()
@@ -86,13 +89,16 @@ class SymphonyOrchestrator:
 
         # 1. Fetch candidates from the configured tracker.
         candidates = self.tracker.fetch_candidate_issues(active_states)
+        logger.debug(f"Found {len(candidates)} candidate issues ({[issue["identifier"] for issue in candidates]})")
         
         for issue in candidates:
             # Respect concurrency limits
             if len(self.state.running) >= self.state.max_concurrent_agents:
+                logger.debug(f"Max number of agents running already, skipping turn")
                 break
                 
             issue_id = issue["id"]
+            issue_key = issue["identifier"]
             
             # Skip if already being processed OR completed
             if (
@@ -100,6 +106,7 @@ class SymphonyOrchestrator:
                 or issue_id in self.state.completed
                 or issue_id in self.state.pending_transitions
             ):
+                logger.debug(f"Skipping {issue_key} in state {issue.get("state")}")
                 continue
             
             # Check labels
@@ -107,16 +114,19 @@ class SymphonyOrchestrator:
             if required_labels:
                 # Issue must have AT LEAST ONE of the required labels
                 if not any(label.lower() in [l.lower() for l in labels] for label in required_labels):
+                    logger.debug(f"Skipping {issue_key} as it is missing the required labels")
                     continue
                 
             phase_name = self._phase_for_issue_state(issue.get("state"))
             if not phase_name:
+                logger.debug(f"Skipping {issue_key} in state {issue.get("state")}")
                 continue
 
             # Do not execute the same phase repeatedly while the tracker still reports
             # the state that triggered the completed execution.
             metadata = self.state.claimed.get(issue_id)
             if metadata and metadata.current_phase == phase_name:
+                logger.debug(f"Skipping {issue_key} as already claimed")
                 continue
 
             logger.info(
