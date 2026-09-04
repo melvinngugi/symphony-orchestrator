@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from app.core.workflow_validation import (
     WorkflowStateValidationError,
     WorkflowValidationError,
 )
+from app.core.config import WorkflowConfigLoadError
 
 
 def _response_payload(response):
@@ -110,6 +112,102 @@ def test_ensure_symphony_home_preserves_existing_value(monkeypatch):
     main.ensure_symphony_home()
 
     assert os.environ.get("SYMPHONY_HOME") == "/custom/symphony"
+
+
+def test_workflow_path_defaults_to_workflow_md(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORKFLOW_PATH", raising=False)
+
+    assert main.resolve_workflow_path() == tmp_path / "WORKFLOW.md"
+
+
+def test_workflow_path_uses_relative_environment_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WORKFLOW_PATH", "config/custom.md")
+
+    assert main.resolve_workflow_path() == tmp_path / "config/custom.md"
+
+
+def test_workflow_path_accepts_absolute_environment_path(monkeypatch, tmp_path):
+    workflow_path = tmp_path / "absolute.md"
+    monkeypatch.setenv("WORKFLOW_PATH", str(workflow_path))
+
+    assert main.resolve_workflow_path() == workflow_path
+
+
+def test_cli_workflow_path_overrides_environment(monkeypatch, tmp_path):
+    environment_path = tmp_path / "environment.md"
+    cli_path = tmp_path / "cli.md"
+    uvicorn_calls = []
+    monkeypatch.setenv("WORKFLOW_PATH", str(environment_path))
+    monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(
+        main.uvicorn,
+        "run",
+        lambda *args, **kwargs: uvicorn_calls.append((args, kwargs)),
+    )
+
+    main.run(["--workflow", str(cli_path)])
+
+    assert main.get_workflow_path() == cli_path
+    assert uvicorn_calls == [((main.app,), {"host": "0.0.0.0", "port": 8000})]
+
+
+def test_debug_flag_sets_root_logger_to_debug(monkeypatch):
+    uvicorn_calls = []
+    root_logger = logging.getLogger()
+    monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(root_logger, "level", logging.INFO)
+    monkeypatch.setattr(
+        main.uvicorn,
+        "run",
+        lambda *args, **kwargs: uvicorn_calls.append((args, kwargs)),
+    )
+
+    main.run(["--debug"])
+
+    assert root_logger.level == logging.DEBUG
+    assert uvicorn_calls == [((main.app,), {"host": "0.0.0.0", "port": 8000})]
+
+
+def test_default_launch_preserves_logging_level(monkeypatch):
+    root_logger = logging.getLogger()
+    monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(root_logger, "level", logging.WARNING)
+    monkeypatch.setattr(main.uvicorn, "run", lambda *args, **kwargs: None)
+
+    main.run([])
+
+    assert root_logger.level == logging.WARNING
+
+
+def test_missing_selected_workflow_fails_before_external_services(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    workflow_path = tmp_path / "missing.md"
+    monkeypatch.setattr(main, "_workflow_path", workflow_path)
+    monkeypatch.setattr(
+        main,
+        "JiraClient",
+        lambda: pytest.fail("Jira must not be constructed"),
+    )
+    monkeypatch.setattr(
+        main,
+        "BitbucketService",
+        lambda: pytest.fail("Bitbucket must not be constructed"),
+    )
+
+    async def enter_lifespan():
+        context = main.lifespan(None)
+        with pytest.raises(WorkflowConfigLoadError, match=str(workflow_path)):
+            await context.__aenter__()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(enter_lifespan())
+
+    assert str(workflow_path) in caplog.text
 
 
 def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypatch, caplog):
@@ -227,7 +325,7 @@ def test_lifespan_logs_state_misconfiguration_without_traceback(monkeypatch, cap
     assert "Traceback" not in caplog.text
 
 
-def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
+def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch, tmp_path):
     registry = object()
     captured = {}
 
@@ -271,7 +369,14 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
             captured["thread_started"] = True
 
     config = {"phases": {"plan": {}}}
-    monkeypatch.setattr(main, "load_config", lambda _path: config)
+    workflow_path = tmp_path / "selected.md"
+    monkeypatch.setattr(main, "_workflow_path", workflow_path)
+
+    def load_selected_config(path):
+        captured["workflow_path"] = path
+        return config
+
+    monkeypatch.setattr(main, "load_config", load_selected_config)
     monkeypatch.setattr(main, "JiraClient", lambda: tracker)
     monkeypatch.setattr(main, "BitbucketService", lambda: bitbucket)
     monkeypatch.setattr(main, "ActionRegistry", lambda: registry)
@@ -285,6 +390,7 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch):
     asyncio.run(enter_and_exit_lifespan())
 
     assert captured["config"] is config
+    assert captured["workflow_path"] == str(workflow_path)
     assert captured["tracker"] is tracker
     assert captured["tracker_registered_registry"] is registry
     assert captured["bitbucket"] is bitbucket

@@ -47,6 +47,16 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+
+class WorkflowConfigLoadError(ValueError):
+    """Raised when a workflow definition cannot be read or parsed."""
+
+    def __init__(self, file_path: str, reason: str):
+        self.file_path = file_path
+        self.reason = reason
+        super().__init__(f"Unable to load workflow '{file_path}': {reason}")
+
+
 def load_agents_config(file_path: str = "agents.yaml") -> AgentsRegistry:
     """Loads agent definitions from agents.yaml and validates against Pydantic model."""
     if not os.path.exists(file_path):
@@ -66,17 +76,43 @@ def load_agents_config(file_path: str = "agents.yaml") -> AgentsRegistry:
 
     return registry
 
+
 def load_config(file_path: str = "WORKFLOW.md") -> Dict[str, Any]:
     """Parses YAML configuration from the workflow definition."""
-    if not os.path.exists(file_path):
-        return {}
-        
-    with open(file_path, 'r') as f:
-        content = f.read()
-        
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            return yaml.safe_load(parts[1]) or {}
-            
-    return {}
+    try:
+        with open(file_path, 'r') as f:
+            content = f.read()
+    except (OSError, UnicodeError) as exc:
+        raise WorkflowConfigLoadError(file_path, str(exc)) from exc
+
+    if not content.startswith("---"):
+        raise WorkflowConfigLoadError(
+            file_path,
+            "expected YAML front matter starting with '---'",
+        )
+
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        raise WorkflowConfigLoadError(
+            file_path,
+            "YAML front matter is missing its closing '---' delimiter",
+        )
+
+    try:
+        config = yaml.safe_load(parts[1])
+    except yaml.YAMLError as exc:
+        raise WorkflowConfigLoadError(file_path, f"invalid YAML: {exc}") from exc
+
+    if config is None:
+        raise WorkflowConfigLoadError(
+            file_path,
+            "YAML front matter must not be empty",
+        )
+
+    if not isinstance(config, dict):
+        raise WorkflowConfigLoadError(
+            file_path,
+            "YAML front matter must contain a mapping",
+        )
+
+    return config

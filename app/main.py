@@ -1,15 +1,17 @@
+import argparse
 import logging
 import asyncio
 import threading
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Sequence
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
-from app.core.config import load_config, settings
+from app.core.config import WorkflowConfigLoadError, load_config, settings
 from app.core.orchestrator import SymphonyOrchestrator
 from app.core.workflow_validation import (
     WorkflowStateValidationError,
@@ -35,6 +37,29 @@ global_orchestrator = None
 global_usage_collector = None
 global_orchestrator_thread = None
 global_readiness_error = None
+_workflow_path: Path | None = None
+
+
+def resolve_workflow_path(cli_path: str | None = None) -> Path:
+    """Resolve the workflow selected by CLI, environment, or the default."""
+    selected_path = cli_path
+    if selected_path is None:
+        selected_path = os.getenv("WORKFLOW_PATH") or "WORKFLOW.md"
+    return Path(selected_path).expanduser().resolve()
+
+
+def configure_workflow_path(cli_path: str | None = None) -> Path:
+    """Select and retain the workflow path for this process."""
+    global _workflow_path
+    _workflow_path = resolve_workflow_path(cli_path)
+    return _workflow_path
+
+
+def get_workflow_path() -> Path:
+    """Return the process workflow path, resolving environment defaults once."""
+    if _workflow_path is None:
+        return configure_workflow_path()
+    return _workflow_path
 
 
 def ensure_symphony_home() -> None:
@@ -46,6 +71,7 @@ def ensure_symphony_home() -> None:
     os.environ["SYMPHONY_HOME"] = symphony_home
     logger.info(f"SYMPHONY_HOME not set; defaulting to {symphony_home}")
 
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global global_orchestrator, global_usage_collector
@@ -55,7 +81,13 @@ async def lifespan(_: FastAPI):
     global_orchestrator_thread = None
     global_readiness_error = None
     ensure_symphony_home()
-    config = load_config("WORKFLOW.md")
+    workflow_path = get_workflow_path()
+    logger.info("Loading workflow from %s", workflow_path)
+    try:
+        config = load_config(str(workflow_path))
+    except WorkflowConfigLoadError as exc:
+        logger.error("Workflow loading failed: %s", exc)
+        raise
     try:
         tracker = JiraClient()
         bitbucket = BitbucketService()
@@ -184,8 +216,32 @@ async def dashboard(request: Request):
         }
     )
 
-if __name__ == "__main__":
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Symphony orchestrator")
+    parser.add_argument(
+        "--workflow",
+        metavar="PATH",
+        help="workflow Markdown file (overrides WORKFLOW_PATH)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="enable debug logging",
+    )
+    return parser.parse_args(argv)
+
+
+def run(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    configure_workflow_path(args.workflow)
     logger.info("Starting Symphony Server...")
     ensure_symphony_home()
     # Execute this file to start both the background daemon and the UI on port 8000
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    run()
