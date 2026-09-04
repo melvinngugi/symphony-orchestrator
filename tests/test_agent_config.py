@@ -18,6 +18,16 @@ def test_project_structured_agents_define_result_destination():
             assert any("{structured}" in argument for argument in agent.args)
 
 
+def test_planner_returns_plan_as_structured_output_without_writing_repository():
+    planner = load_agents_config("agents.yaml").agents["planner"]
+    planner_prompt = " ".join(planner.args)
+
+    assert planner.sandbox == "read-only"
+    assert planner.required_outputs == {"success": ["plan.md"]}
+    assert "Do not create or modify files in the repository" in planner_prompt
+    assert "solely as a text output named plan.md" in planner_prompt
+
+
 def test_load_agents_config_rejects_structured_agent_without_placeholder(tmp_path):
     config_path = tmp_path / "agents.yaml"
     config_path.write_text(

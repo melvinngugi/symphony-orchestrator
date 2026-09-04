@@ -10,13 +10,17 @@ agents:
       - "$SYMPHONY_HOME/agent-output-schema.json"
       - "--output-last-message"
       - "{structured}"
-      - "/plan Analyze the issue from stdin, provide a plan.md file to implement the issue if it is clear enough, otherwise mark the issue as insufficient input. Return the output in the requested structured schema"
+      - >-
+        /plan Analyze the issue from stdin. Do not create or modify files in the
+        repository. If the issue is clear enough, return the implementation plan
+        solely as a text output named plan.md in the requested structured schema;
+        otherwise mark the issue as insufficient input.
     stdin: "issue.json"
     structured: "planner-result.json"
     required_outputs:
       success:
         - "plan.md"
-    sandbox: "workspace-write"
+    sandbox: "read-only"
 
   implementer:
     command: "codex"
