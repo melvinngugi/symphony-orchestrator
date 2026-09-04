@@ -210,6 +210,84 @@ def test_missing_selected_workflow_fails_before_external_services(
     assert str(workflow_path) in caplog.text
 
 
+def test_empty_strategy_titles_create_no_confluence_client(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "ConfluenceClient",
+        lambda **_kwargs: pytest.fail("Empty titles must not require Confluence"),
+    )
+
+    providers = main.create_scheduled_document_providers(
+        [
+            (
+                "backlog_curation",
+                {
+                    "input": {
+                        "strategy_pages": {
+                            "titles": [],
+                            "space_keys": [],
+                            "fail_on_missing": True,
+                        }
+                    }
+                },
+            )
+        ]
+    )
+
+    assert providers == {}
+
+
+def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
+    created = []
+
+    class FakeConfluenceClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.fetched = []
+            created.append(self)
+
+        def fetch_documents_by_name(self, names):
+            self.fetched.append(names)
+            return []
+
+    monkeypatch.setattr(main, "ConfluenceClient", FakeConfluenceClient)
+    providers = main.create_scheduled_document_providers(
+        [
+            (
+                "one",
+                {
+                    "input": {
+                        "strategy_pages": {
+                            "titles": ["Strategy One"],
+                            "space_keys": ["ONE"],
+                            "fail_on_missing": False,
+                        }
+                    }
+                },
+            ),
+            (
+                "two",
+                {
+                    "input": {
+                        "strategy_pages": {
+                            "titles": ["Strategy Two"],
+                            "space_keys": ["TWO"],
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+
+    assert providers == {"one": created[0], "two": created[1]}
+    assert created[0].kwargs == {
+        "space_keys": ["ONE"],
+        "fail_on_missing_documents": False,
+    }
+    assert created[0].fetched == [["Strategy One"]]
+    assert created[1].fetched == [["Strategy Two"]]
+
+
 def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypatch, caplog):
     thread_calls = []
     registry = object()

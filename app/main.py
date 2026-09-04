@@ -25,6 +25,8 @@ from app.services.agent import (
 )
 from app.services.bitbucket import BitbucketService
 from app.services.jira import JiraClient
+from app.services.backlog import BacklogCurationInputProvider
+from app.services.confluence import ConfluenceClient
 from app.models.usage import UsageSnapshot
 from app.services.usage import CodexUsageCollector
 
@@ -72,6 +74,24 @@ def ensure_symphony_home() -> None:
     logger.info(f"SYMPHONY_HOME not set; defaulting to {symphony_home}")
 
 
+def create_scheduled_document_providers(
+    enabled_schedules: list[tuple[str, dict]],
+) -> dict[str, ConfluenceClient]:
+    providers: dict[str, ConfluenceClient] = {}
+    for phase_name, phase in enabled_schedules:
+        strategy_pages = phase["input"]["strategy_pages"]
+        titles = strategy_pages.get("titles", [])
+        if not titles:
+            continue
+        provider = ConfluenceClient(
+            space_keys=strategy_pages["space_keys"],
+            fail_on_missing_documents=strategy_pages.get("fail_on_missing", True),
+        )
+        provider.fetch_documents_by_name(titles)
+        providers[phase_name] = provider
+    return providers
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global global_orchestrator, global_usage_collector
@@ -98,8 +118,7 @@ async def lifespan(_: FastAPI):
             plan_provider=tracker,
             review_provider=bitbucket,
         )
-        global_orchestrator = SymphonyOrchestrator(
-            config,
+        orchestrator_kwargs = dict(
             tracker=tracker,
             bitbucket_service=bitbucket,
             action_registry=action_registry,
@@ -111,6 +130,22 @@ async def lifespan(_: FastAPI):
                 termination_grace_seconds=settings.AGENT_TERMINATION_GRACE_SECONDS,
             ),
         )
+        enabled_schedules = [
+            (phase_name, phase)
+            for phase_name, phase in config.get("scheduled_phases", {}).items()
+            if isinstance(phase, dict) and phase.get("enabled", True) is not False
+        ]
+        document_providers = {}
+        if enabled_schedules:
+            orchestrator_kwargs["scheduled_input_provider"] = BacklogCurationInputProvider(
+                tracker,
+                document_providers,
+            )
+        orchestrator = SymphonyOrchestrator(config, **orchestrator_kwargs)
+        document_providers.update(
+            create_scheduled_document_providers(enabled_schedules)
+        )
+        global_orchestrator = orchestrator
     except WorkflowStateValidationError as exc:
         global_orchestrator = None
         global_usage_collector = None

@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+import re
 from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.services.actions import ActionResolver, CompletionTransition
 
@@ -79,6 +81,27 @@ def collect_workflow_state_references(config: object) -> tuple[WorkflowStateRefe
                 if next_state is not None:
                     references.append(WorkflowStateReference(f"{path}.next", next_state))
 
+    scheduled = config.get("scheduled_phases", {}) if isinstance(config, dict) else {}
+    if isinstance(scheduled, dict):
+        for phase_name, phase_config in scheduled.items():
+            if not isinstance(phase_config, dict) or phase_config.get("enabled", True) is False:
+                continue
+            transitions = phase_config.get("transitions", {})
+            if not isinstance(transitions, dict):
+                continue
+            for status in ("success", "blocked"):
+                configured = transitions.get(status)
+                if not isinstance(configured, dict):
+                    continue
+                next_state = _non_empty_string(configured.get("next"))
+                if next_state is not None:
+                    references.append(
+                        WorkflowStateReference(
+                            f"scheduled_phases.{phase_name}.transitions.{status}.next",
+                            next_state,
+                        )
+                    )
+
     return tuple(references)
 
 
@@ -134,6 +157,65 @@ def _inspect_workflow(config: object, action_registry: ActionResolver) -> _Workf
                 path,
                 action_registry,
                 errors,
+                allow_action_only=False,
+            )
+            if normalized is not None:
+                completion_transitions[(phase_name, status)] = normalized
+
+    scheduled_phases = config.get("scheduled_phases", {})
+    if not isinstance(scheduled_phases, dict):
+        errors.append("scheduled_phases: must be a mapping")
+        scheduled_phases = {}
+
+    for phase_name, phase_config in scheduled_phases.items():
+        phase_path = f"scheduled_phases.{phase_name}"
+        if phase_name in phases:
+            errors.append(f"{phase_path}: phase name is already used under phases")
+        if not isinstance(phase_config, dict):
+            errors.append(f"{phase_path}: must be a mapping")
+            continue
+        if phase_config.get("enabled", True) is False:
+            continue
+        for field_name in ("agent", "daily_at", "timezone", "audit_issue"):
+            if _non_empty_string(phase_config.get(field_name)) is None:
+                errors.append(f"{phase_path}.{field_name}: must be a non-empty string")
+        daily_at = _non_empty_string(phase_config.get("daily_at"))
+        if daily_at is not None:
+            try:
+                hour_text, minute_text = daily_at.split(":")
+                valid_time = (
+                    len(hour_text) == 2
+                    and len(minute_text) == 2
+                    and 0 <= int(hour_text) <= 23
+                    and 0 <= int(minute_text) <= 59
+                )
+            except (TypeError, ValueError):
+                valid_time = False
+            if not valid_time:
+                errors.append(f"{phase_path}.daily_at: must use 24-hour HH:MM format")
+        timezone_name = _non_empty_string(phase_config.get("timezone"))
+        if timezone_name is not None:
+            try:
+                ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError:
+                errors.append(f"{phase_path}.timezone: unknown timezone '{timezone_name}'")
+
+        _inspect_backlog_curation_config(phase_config, phase_path, errors)
+
+        transitions = phase_config.get("transitions")
+        if not isinstance(transitions, dict):
+            errors.append(f"{phase_path}.transitions: must be a mapping")
+            continue
+        for status in ("success", "blocked"):
+            if status not in transitions:
+                continue
+            path = f"{phase_path}.transitions.{status}"
+            normalized = _inspect_completion_transition(
+                transitions[status],
+                path,
+                action_registry,
+                errors,
+                allow_action_only=True,
             )
             if normalized is not None:
                 completion_transitions[(phase_name, status)] = normalized
@@ -148,6 +230,8 @@ def _inspect_completion_transition(
     path: str,
     action_registry: ActionResolver,
     errors: list[str],
+    *,
+    allow_action_only: bool,
 ) -> CompletionTransition | None:
     state_name = _non_empty_string(configured)
     if state_name is not None:
@@ -156,13 +240,15 @@ def _inspect_completion_transition(
     if not isinstance(configured, dict):
         errors.append(f"{path}: must be a non-empty string or an expanded transition")
         return None
-    if set(configured) != {"next", "do"}:
-        errors.append(f"{path}: must contain exactly 'next' and 'do'")
+    expected_keys = ({"do"},) if allow_action_only else ({"next", "do"},)
+    if set(configured) not in expected_keys:
+        expectation = "exactly 'do'" if allow_action_only else "exactly 'next' and 'do'"
+        errors.append(f"{path}: must contain {expectation}")
         return None
 
     next_path = f"{path}.next"
     next_state = _non_empty_string(configured.get("next"))
-    if next_state is None:
+    if "next" in configured and next_state is None:
         errors.append(f"{next_path}: must be a non-empty string")
 
     action_names: list[str] = []
@@ -184,9 +270,125 @@ def _inspect_completion_transition(
                 continue
             action_names.append(action_name)
 
-    if next_state is None or not isinstance(configured_actions, list):
+    if ("next" in configured and next_state is None) or not isinstance(configured_actions, list):
         return None
     return CompletionTransition(next_state=next_state, actions=tuple(action_names))
+
+
+def _inspect_backlog_curation_config(
+    configured: dict,
+    path: str,
+    errors: list[str],
+) -> None:
+    input_config = configured.get("input")
+    jira_config = configured.get("jira")
+    confidence_config = configured.get("confidence")
+    if not isinstance(input_config, dict):
+        errors.append(f"{path}.input: must be a mapping")
+    else:
+        legacy_fields = sorted(
+            field_name
+            for field_name in (
+                "confluence_page_ids",
+                "confluence_page_names",
+                "confluence_space_keys",
+            )
+            if field_name in input_config
+        )
+        for field_name in legacy_fields:
+            errors.append(
+                f"{path}.input.{field_name}: replaced by input.strategy_pages"
+            )
+        strategy_pages = input_config.get("strategy_pages")
+        if not isinstance(strategy_pages, dict):
+            errors.append(f"{path}.input.strategy_pages: must be a mapping")
+        else:
+            allowed_strategy_fields = {"titles", "space_keys", "fail_on_missing"}
+            extra_fields = sorted(set(strategy_pages) - allowed_strategy_fields)
+            for field_name in extra_fields:
+                errors.append(
+                    f"{path}.input.strategy_pages.{field_name}: unknown configuration field"
+                )
+            for list_name in ("titles", "space_keys"):
+                values = strategy_pages.get(list_name, [])
+                if not isinstance(values, list) or any(
+                    _non_empty_string(value) is None for value in values
+                ):
+                    errors.append(
+                        f"{path}.input.strategy_pages.{list_name}: "
+                        "must be a list of non-empty strings"
+                    )
+            titles = strategy_pages.get("titles", [])
+            space_keys = strategy_pages.get("space_keys", [])
+            if isinstance(titles, list) and titles and (
+                not isinstance(space_keys, list) or not space_keys
+            ):
+                errors.append(
+                    f"{path}.input.strategy_pages.space_keys: "
+                    "must contain at least one space key when titles are configured"
+                )
+            fail_on_missing = strategy_pages.get("fail_on_missing", True)
+            if not isinstance(fail_on_missing, bool):
+                errors.append(
+                    f"{path}.input.strategy_pages.fail_on_missing: must be a boolean"
+                )
+    if not isinstance(jira_config, dict):
+        errors.append(f"{path}.jira: must be a mapping")
+    else:
+        for field_name in (
+            "business_value_score_field",
+            "business_value_rationale_field",
+            "clarification_label",
+            "review_label",
+            "dependency_link_type",
+        ):
+            if _non_empty_string(jira_config.get(field_name)) is None:
+                errors.append(f"{path}.jira.{field_name}: must be a non-empty string")
+        for field_name in (
+            "business_value_score_field",
+            "business_value_rationale_field",
+        ):
+            field_value = _non_empty_string(jira_config.get(field_name))
+            if field_value is not None and re.fullmatch(r"customfield_\d+", field_value) is None:
+                errors.append(f"{path}.jira.{field_name}: must be a Jira customfield_<id>")
+        link_type = _non_empty_string(jira_config.get("dependency_link_type"))
+        if link_type is not None and link_type != "Blocks":
+            errors.append(f"{path}.jira.dependency_link_type: only 'Blocks' is supported")
+        epic_field = jira_config.get("epic_field")
+        if epic_field not in (None, "") and (
+            not isinstance(epic_field, str)
+            or re.fullmatch(r"customfield_\d+", epic_field.strip()) is None
+        ):
+            errors.append(f"{path}.jira.epic_field: must be empty or a Jira customfield_<id>")
+    if not isinstance(confidence_config, dict):
+        errors.append(f"{path}.confidence: must be a mapping")
+    else:
+        for confidence_name in ("business_value", "dependency", "clarification"):
+            value = confidence_config.get(confidence_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                errors.append(f"{path}.confidence.{confidence_name}: must be between 0 and 1")
+    dry_run = configured.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        errors.append(f"{path}.dry_run: must be a boolean")
+
+    if isinstance(input_config, dict):
+        jql = input_config.get("jql", "")
+        ignore_label = input_config.get("ignore_label", "backlog-curation-ignore")
+        if not isinstance(jql, str):
+            errors.append(f"{path}.input.jql: must be a string")
+        if _non_empty_string(ignore_label) is None:
+            errors.append(f"{path}.input.ignore_label: must be a non-empty string")
+        weights = input_config.get("scoring_weights")
+        expected_weights = {
+            "customerImpact", "revenueOrCostImpact", "strategicAlignment", "riskReduction"
+        }
+        if not isinstance(weights, dict) or set(weights) != expected_weights:
+            errors.append(f"{path}.input.scoring_weights: must define the four scoring dimensions")
+        elif any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+            for value in weights.values()
+        ) or abs(sum(float(value) for value in weights.values()) - 1.0) > 0.000001:
+            errors.append(f"{path}.input.scoring_weights: values must be non-negative and sum to 1")
 
 
 def _non_empty_string(value: object) -> str | None:

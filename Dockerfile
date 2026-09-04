@@ -15,6 +15,7 @@ COPY app /app/app
 COPY WORKFLOW.md /app/WORKFLOW.md
 COPY agents.yaml /app/agents.yaml
 COPY agent-output-schema.json /app/agent-output-schema.json
+COPY backlog-curation-schema.json /app/backlog-curation-schema.json
 RUN uv run --python /opt/venv/bin/python python -m compileall -q /app/app
 
 FROM python:3.14-slim AS codex
@@ -43,6 +44,7 @@ COPY --from=builder /app/app /app/app
 COPY --from=builder /app/WORKFLOW.md /app/WORKFLOW.md
 COPY --from=builder /app/agents.yaml /app/agents.yaml
 COPY --from=builder /app/agent-output-schema.json /app/agent-output-schema.json
+COPY --from=builder /app/backlog-curation-schema.json /app/backlog-curation-schema.json
 COPY --from=codex /usr/local/bin/codex /usr/local/bin/codex
 
 RUN mkdir -p /app/workspaces /root/.codex

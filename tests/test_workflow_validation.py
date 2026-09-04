@@ -122,3 +122,56 @@ def test_shipped_workflow_actions_are_registered_by_composed_adapters():
     assert transitions[("review", "blocked")].actions == (
         "bitbucket:publish-review-comment",
     )
+
+
+def _enabled_curator_config():
+    config = load_config("WORKFLOW.md")
+    config["scheduled_phases"]["backlog_curation"]["enabled"] = True
+    return config
+
+
+def _adapter_actions():
+    registry = ActionRegistry()
+    JiraClient.__new__(JiraClient).register_actions(registry)
+    BitbucketService.__new__(BitbucketService).register_actions(registry)
+    return registry
+
+
+@pytest.mark.parametrize(
+    ("strategy_pages", "expected_error"),
+    [
+        ([], "strategy_pages: must be a mapping"),
+        (
+            {"titles": ["Product Strategy"], "space_keys": []},
+            "space_keys: must contain at least one space key",
+        ),
+        (
+            {"titles": "Product Strategy", "space_keys": ["STRATEGY"]},
+            "titles: must be a list of non-empty strings",
+        ),
+        (
+            {"titles": [], "space_keys": [], "fail_on_missing": "yes"},
+            "fail_on_missing: must be a boolean",
+        ),
+    ],
+)
+def test_curator_strategy_pages_configuration_is_strictly_validated(
+    strategy_pages, expected_error
+):
+    config = _enabled_curator_config()
+    config["scheduled_phases"]["backlog_curation"]["input"][
+        "strategy_pages"
+    ] = strategy_pages
+
+    with pytest.raises(WorkflowValidationError, match=expected_error):
+        validate_workflow_config(config, _adapter_actions())
+
+
+def test_curator_rejects_replaced_confluence_fields():
+    config = _enabled_curator_config()
+    config["scheduled_phases"]["backlog_curation"]["input"][
+        "confluence_space_keys"
+    ] = ["STRATEGY"]
+
+    with pytest.raises(WorkflowValidationError, match="replaced by input.strategy_pages"):
+        validate_workflow_config(config, _adapter_actions())

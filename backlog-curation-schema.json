@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "runId": {"type": "string", "minLength": 1},
+    "sourceSnapshotAt": {"type": "string", "minLength": 1},
+    "ticketValues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "issueKey": {"type": "string", "minLength": 1},
+          "dimensions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "customerImpact": {"type": "integer", "minimum": 0, "maximum": 100},
+              "revenueOrCostImpact": {"type": "integer", "minimum": 0, "maximum": 100},
+              "strategicAlignment": {"type": "integer", "minimum": 0, "maximum": 100},
+              "riskReduction": {"type": "integer", "minimum": 0, "maximum": 100}
+            },
+            "required": ["customerImpact", "revenueOrCostImpact", "strategicAlignment", "riskReduction"]
+          },
+          "score": {"type": "integer", "minimum": 0, "maximum": 100},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+        },
+        "required": ["issueKey", "dimensions", "score", "confidence", "rationale", "evidence"]
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "blocker": {"type": "string", "minLength": 1},
+          "blocked": {"type": "string", "minLength": 1},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+        },
+        "required": ["blocker", "blocked", "confidence", "evidence"]
+      }
+    },
+    "clarifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "issueKey": {"type": "string", "minLength": 1},
+          "questions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+        },
+        "required": ["issueKey", "questions", "confidence", "evidence"]
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["runId", "sourceSnapshotAt", "ticketValues", "dependencies", "clarifications", "warnings"]
+}

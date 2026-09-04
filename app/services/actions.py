@@ -14,6 +14,7 @@ class PhaseResult:
     agent_name: str
     agent_config: AgentConfig
     execution: AgentExecutionResult
+    phase_config: Optional[dict] = None
 
 
 Action = Callable[[PhaseResult], None]
@@ -31,7 +32,7 @@ class ActionResolver(Protocol):
 
 @dataclass(frozen=True)
 class CompletionTransition:
-    next_state: str
+    next_state: Optional[str] = None
     actions: tuple[str, ...] = ()
 
 

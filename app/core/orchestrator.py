@@ -2,6 +2,7 @@ import time
 import logging
 from datetime import datetime
 import json
+import os
 from typing import Callable, Optional
 
 from app.models.agent_config import AgentsRegistry
@@ -13,6 +14,7 @@ from app.models.state import (
     PendingTransitionDetail,
 )
 from app.models.workspace import repository_path
+from app.core.config import settings
 from app.services.agent import (
     AgentExecutionController,
     AgentExecutionRequest,
@@ -24,6 +26,13 @@ from app.services.tracker import TrackerAdapter
 from app.core.config import load_agents_config
 from app.core.workflow_validation import (
     validate_workflow_config,
+)
+from app.services.scheduler import (
+    JsonScheduledRunStore,
+    ScheduledInputProvider,
+    ScheduledRunStore,
+    latest_daily_run_id,
+    scheduled_workspace,
 )
 
 logger = logging.getLogger("symphony.orchestrator")
@@ -39,6 +48,9 @@ class SymphonyOrchestrator:
         agents_registry: Optional[AgentsRegistry] = None,
         execution_controller: Optional[AgentExecutionController] = None,
         issue_writer: Optional[Callable[[str, dict], None]] = None,
+        scheduled_input_provider: Optional[ScheduledInputProvider] = None,
+        scheduled_run_store: Optional[ScheduledRunStore] = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ):
         self.config = config
         self.agents_config = agents_registry or load_agents_config()
@@ -49,12 +61,25 @@ class SymphonyOrchestrator:
         self.bitbucket = bitbucket_service
         self.execution_controller = execution_controller or SubprocessAgentExecutionController()
         self.issue_writer = issue_writer or self._write_issue_json
+        self.scheduled_input_provider = scheduled_input_provider
+        self.scheduled_run_store = scheduled_run_store or JsonScheduledRunStore(
+            os.path.join(settings.WORKSPACE_ROOT, ".scheduled-runs.json")
+        )
+        self.clock = clock or datetime.now
         self.action_registry = action_registry
         self.completion_transitions = validate_workflow_config(
             self.config,
             self.action_registry,
         )
         self.tracker.validate_workflow_states(self.config)
+        if self._enabled_scheduled_phases() and self.scheduled_input_provider is None:
+            raise ValueError("Enabled scheduled phases require a scheduled input provider")
+        for phase_name, phase_config in self._enabled_scheduled_phases().items():
+            agent_name = phase_config.get("agent")
+            if agent_name not in self.agents_config.agents:
+                raise ValueError(
+                    f"Scheduled phase '{phase_name}' references unknown agent '{agent_name}'"
+                )
 
         # Apply config overrides
         if "polling" in self.config:
@@ -79,6 +104,7 @@ class SymphonyOrchestrator:
 
     def _tick(self):
         """Poll the tracker and dispatch each issue to the phase matching its state."""
+        self._tick_scheduled_phases()
         tracker_config = self.config.get("tracker", {})
         required_labels = tracker_config.get("required_labels", [])
 
@@ -222,15 +248,19 @@ class SymphonyOrchestrator:
 
                     agent_name = self._agent_name_for_phase(metadata.current_phase)
                     agent_config = self.agents_config.agents[agent_name]
+                    phase_config = self._phase_config(metadata.current_phase)
                     self._transition_for_phase_status(
                         PhaseResult(
                             issue=issue,
                             workspace_path=workspace_path,
-                            repository_path=repository_path(workspace_path),
+                            repository_path=task.get(
+                                "repository_path", repository_path(workspace_path)
+                            ),
                             phase_name=metadata.current_phase,
                             agent_name=agent_name,
                             agent_config=agent_config,
                             execution=result,
+                            phase_config=phase_config,
                         )
                     )
 
@@ -238,11 +268,19 @@ class SymphonyOrchestrator:
         for issue_id in completed_ids:
             del self.state.running[issue_id]
 
-    def _dispatch_phase(self, issue: dict, workspace_path: str, phase_name: str) -> bool:
+    def _dispatch_phase(
+        self,
+        issue: dict,
+        workspace_path: str,
+        phase_name: str,
+        *,
+        execution_directory: Optional[str] = None,
+        apply_start_transition: bool = True,
+    ) -> bool:
         issue_id = issue["id"]
         identifier = issue.get("identifier")
         
-        phase_config = self.config.get("phases", {}).get(phase_name)
+        phase_config = self._phase_config(phase_name)
         if not phase_config:
             logger.error(f"Phase {phase_name} not found in config")
             return False
@@ -253,7 +291,7 @@ class SymphonyOrchestrator:
             logger.error(f"Agent {agent_name} not found in agents.yaml")
             return False
 
-        if not self._transition_on_phase_start(issue, phase_name):
+        if apply_start_transition and not self._transition_on_phase_start(issue, phase_name):
             return False
 
         logger.info(f"Dispatching phase {phase_name} for {identifier} using agent {agent_name}")
@@ -263,7 +301,7 @@ class SymphonyOrchestrator:
                 issue=issue,
                 agent_config=agent_config,
                 workspace_path=workspace_path,
-                repository_path=repository_path(workspace_path),
+                repository_path=execution_directory or repository_path(workspace_path),
             )
         )
         
@@ -288,6 +326,7 @@ class SymphonyOrchestrator:
             "execution": execution,
             "metadata": metadata,
             "workspace_path": workspace_path,
+            "repository_path": execution_directory or repository_path(workspace_path),
             "issue": issue
         }
         return True
@@ -317,6 +356,7 @@ class SymphonyOrchestrator:
             (phase_result.phase_name, phase_result.execution.status)
         )
         if transition is None:
+            self._complete_scheduled_run(phase_result)
             return
 
         issue_id = phase_result.issue.get("id")
@@ -379,28 +419,30 @@ class SymphonyOrchestrator:
                         f"{phase_result.phase_name}: {e}"
                     )
 
-        try:
-            transitioned = self.tracker.transition_issue(issue_key, pending.target_state)
-        except Exception as e:
-            error_msg = (
-                f"Failed tracker transition for {issue_key} on status "
-                f"'{phase_result.execution.status}' in phase "
-                f"{phase_result.phase_name}: {e}"
-            )
-            self.add_error(error_msg)
-            logger.error(error_msg)
-            return
+        if pending.target_state:
+            try:
+                transitioned = self.tracker.transition_issue(issue_key, pending.target_state)
+            except Exception as e:
+                error_msg = (
+                    f"Failed tracker transition for {issue_key} on status "
+                    f"'{phase_result.execution.status}' in phase "
+                    f"{phase_result.phase_name}: {e}"
+                )
+                self.add_error(error_msg)
+                logger.error(error_msg)
+                return
 
-        if not transitioned:
-            error_msg = (
-                f"Failed tracker transition for {issue_key} on status "
-                f"'{phase_result.execution.status}' in phase "
-                f"{phase_result.phase_name} to '{pending.target_state}'"
-            )
-            self.add_error(error_msg)
-            logger.error(error_msg)
-            return
+            if not transitioned:
+                error_msg = (
+                    f"Failed tracker transition for {issue_key} on status "
+                    f"'{phase_result.execution.status}' in phase "
+                    f"{phase_result.phase_name} to '{pending.target_state}'"
+                )
+                self.add_error(error_msg)
+                logger.error(error_msg)
+                return
 
+        self._complete_scheduled_run(phase_result)
         del self.state.pending_transitions[issue_id]
 
     def _transition_on_phase_start(self, issue: dict, phase_name: str) -> bool:
@@ -442,7 +484,7 @@ class SymphonyOrchestrator:
             completion = self.completion_transitions.get((phase_name, transition))
             return completion.next_state if completion else None
 
-        phase_config = self.config.get("phases", {}).get(phase_name, {})
+        phase_config = self._phase_config(phase_name)
         transitions_cfg = phase_config.get("transitions")
         if not isinstance(transitions_cfg, dict):
             return None
@@ -455,9 +497,97 @@ class SymphonyOrchestrator:
         return self._target_state_for_phase_transition(phase_name, status)
 
     def _agent_name_for_phase(self, phase_name: str) -> str:
-        phase_config = self.config.get("phases", {}).get(phase_name, {})
+        phase_config = self._phase_config(phase_name)
         agent_name = phase_config.get("agent")
         return agent_name if isinstance(agent_name, str) and agent_name.strip() else "unknown"
+
+    def _phase_config(self, phase_name: str) -> dict:
+        for section in ("phases", "scheduled_phases"):
+            configured = self.config.get(section, {}).get(phase_name, {})
+            if isinstance(configured, dict) and configured:
+                return configured
+        return {}
+
+    def _enabled_scheduled_phases(self) -> dict[str, dict]:
+        configured = self.config.get("scheduled_phases", {})
+        if not isinstance(configured, dict):
+            return {}
+        return {
+            name: phase
+            for name, phase in configured.items()
+            if isinstance(phase, dict) and phase.get("enabled", True) is not False
+        }
+
+    def _tick_scheduled_phases(self) -> None:
+        if len(self.state.running) >= self.state.max_concurrent_agents:
+            return
+        for phase_name, phase_config in self._enabled_scheduled_phases().items():
+            run_id = latest_daily_run_id(
+                phase_name,
+                phase_config["daily_at"],
+                phase_config["timezone"],
+                self.clock(),
+            )
+            issue_id = f"scheduled:{run_id}"
+            if (
+                self.scheduled_run_store.is_complete(phase_name, run_id)
+                or issue_id in self.state.running
+                or issue_id in self.state.pending_transitions
+            ):
+                continue
+            self._dispatch_scheduled_phase(phase_name, run_id, phase_config)
+            if len(self.state.running) >= self.state.max_concurrent_agents:
+                return
+
+    def _dispatch_scheduled_phase(
+        self,
+        phase_name: str,
+        run_id: str,
+        phase_config: dict,
+    ) -> None:
+        assert self.scheduled_input_provider is not None
+        workspace_path = scheduled_workspace(
+            settings.WORKSPACE_ROOT,
+            phase_name,
+            run_id,
+        )
+        input_name = self.agents_config.agents[phase_config["agent"]].stdin
+        input_path = os.path.join(workspace_path, input_name)
+        content = self.scheduled_input_provider.build_input(
+            phase_name,
+            run_id,
+            phase_config,
+        )
+        os.makedirs(os.path.dirname(input_path), exist_ok=True)
+        with open(input_path, "wb") as handle:
+            handle.write(content)
+
+        issue = {
+            "id": f"scheduled:{run_id}",
+            "identifier": phase_config["audit_issue"],
+            "title": f"Scheduled backlog curation {run_id}",
+            "state": "scheduled",
+            "labels": [],
+            "scheduled": True,
+            "schedule_name": phase_name,
+            "run_id": run_id,
+        }
+        self.issue_writer(workspace_path, issue)
+        self._dispatch_phase(
+            issue,
+            workspace_path,
+            phase_name,
+            execution_directory=workspace_path,
+            apply_start_transition=False,
+        )
+
+    def _complete_scheduled_run(self, phase_result: PhaseResult) -> None:
+        if not phase_result.issue.get("scheduled"):
+            return
+        schedule_name = phase_result.issue.get("schedule_name")
+        run_id = phase_result.issue.get("run_id")
+        if isinstance(schedule_name, str) and isinstance(run_id, str):
+            self.scheduled_run_store.mark_complete(schedule_name, run_id)
 
     def _build_agent_comment(self, agent_name: str, message: str, needed_clarifications: list[str]) -> str:
         clean_message = message.strip() if isinstance(message, str) else ""

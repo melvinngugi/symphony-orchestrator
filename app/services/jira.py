@@ -1,6 +1,10 @@
 from contextlib import ExitStack
+import hashlib
+import json
 import mimetypes
 import os
+import re
+import shutil
 import requests
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Any, Optional
@@ -12,6 +16,11 @@ from app.core.workflow_validation import (
     collect_workflow_state_references,
 )
 from app.services.actions import ActionRegistry, PhaseResult
+from app.services.backlog import (
+    cyclic_dependency_pairs,
+    load_and_validate_curation_result,
+    load_curation_input,
+)
 
 class JiraClient:
     STATUS_SEARCH_PAGE_SIZE = 100
@@ -29,6 +38,8 @@ class JiraClient:
     def register_actions(self, registry: ActionRegistry) -> None:
         """Register Jira-owned transition actions."""
         registry.register("jira:attach_outputs", self.attach_outputs)
+        registry.register("jira:apply-backlog-curation", self.apply_backlog_curation)
+        registry.register("jira:attach-curation-outputs", self.attach_curation_outputs)
 
     def attach_outputs(self, phase_result: PhaseResult) -> None:
         """Attach every normalized phase output to its Jira issue."""
@@ -83,6 +94,362 @@ class JiraClient:
                 isinstance(item, dict) for item in payload
             ):
                 raise ValueError("Jira attachment response must be a non-empty attachment array")
+
+    def fetch_backlog_issues(
+        self,
+        jql: str,
+        *,
+        score_field: str,
+        rationale_field: str,
+        epic_field: str | None = None,
+        audit_issue: str,
+        ignore_label: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch and normalize every issue in the configured curation scope."""
+        effective_jql = jql.strip() if isinstance(jql, str) and jql.strip() else (
+            f"project = '{settings.JIRA_PROJECT_KEY}' AND status = 'To Do'"
+        )
+        fields = [
+            "summary",
+            "description",
+            "issuetype",
+            "components",
+            "priority",
+            "status",
+            "labels",
+            "issuelinks",
+            "parent",
+            "created",
+            "updated",
+            score_field,
+            rationale_field,
+        ]
+        if epic_field:
+            fields.append(epic_field)
+        raw_issues = self._search_all(effective_jql, fields)
+        normalized = [
+            self._normalize_curation_issue(
+                issue,
+                score_field=score_field,
+                rationale_field=rationale_field,
+                epic_field=epic_field,
+            )
+            for issue in raw_issues
+        ]
+        ignored_label = ignore_label.strip().casefold()
+        return [
+            issue
+            for issue in normalized
+            if issue["key"].casefold() != audit_issue.strip().casefold()
+            and ignored_label not in {label.casefold() for label in issue["labels"]}
+        ]
+
+    def apply_backlog_curation(self, phase_result: PhaseResult) -> None:
+        """Validate and safely apply a curator-produced Jira change set."""
+        from app.services.backlog import (
+            cyclic_dependency_pairs,
+            load_and_validate_curation_result,
+            load_curation_input,
+        )
+
+        phase_config = phase_result.phase_config or {}
+        jira_config = phase_config.get("jira", {})
+        confidence = phase_config.get("confidence", {})
+        dry_run = bool(phase_config.get("dry_run", True))
+        input_path = self._resolve_output_path(
+            phase_result.workspace_path,
+            phase_result.agent_config.stdin,
+        )
+        result_path = self._resolve_output_path(
+            phase_result.workspace_path,
+            "backlog-curation.json",
+        )
+        input_payload = load_curation_input(input_path)
+        result = load_and_validate_curation_result(result_path, input_payload)
+        tickets = {ticket["key"]: ticket for ticket in input_payload["tickets"]}
+        cyclic_pairs = cyclic_dependency_pairs(result, tickets)
+        report: dict[str, Any] = {
+            "runId": result.runId,
+            "dryRun": dry_run,
+            "sourceSnapshotAt": result.sourceSnapshotAt,
+            "applied": [],
+            "wouldApply": [],
+            "reviewRequired": [],
+            "skipped": [],
+            "warnings": result.warnings,
+        }
+        fresh_cache: dict[str, dict[str, Any]] = {}
+        provenance_cache: dict[str, dict[str, Any]] = {}
+
+        def fresh(issue_key: str) -> dict[str, Any]:
+            if issue_key not in fresh_cache:
+                fresh_cache[issue_key] = self._fetch_curation_issue(
+                    issue_key,
+                    jira_config["business_value_score_field"],
+                    jira_config["business_value_rationale_field"],
+                )
+            return fresh_cache[issue_key]
+
+        def provenance(issue_key: str) -> dict[str, Any]:
+            if issue_key not in provenance_cache:
+                provenance_cache[issue_key] = self._get_curator_property(issue_key)
+            return provenance_cache[issue_key]
+
+        def stale(issue_key: str) -> bool:
+            current_updated = fresh(issue_key).get("updated")
+            if current_updated == tickets[issue_key].get("updated"):
+                return False
+            recorded = provenance(issue_key)
+            return not (
+                recorded.get("lastRunId") == result.runId
+                and recorded.get("lastKnownUpdated") == current_updated
+            )
+
+        def record_intent(issue_key: str, operation_hash: str) -> None:
+            recorded = provenance(issue_key)
+            recorded["operationHashes"] = self._append_operation_hash(
+                recorded.get("operationHashes"), operation_hash
+            )
+            self._put_curator_property(issue_key, recorded)
+
+        def mark_known_update(issue_key: str) -> None:
+            fresh_cache.pop(issue_key, None)
+            current_updated = fresh(issue_key).get("updated")
+            recorded = provenance(issue_key)
+            recorded["lastRunId"] = result.runId
+            recorded["sourceUpdated"] = tickets[issue_key].get("updated")
+            recorded["lastKnownUpdated"] = current_updated
+            self._put_curator_property(issue_key, recorded)
+
+        def require_review(issue_keys: list[str], reason: str, operation: dict) -> None:
+            report["reviewRequired"].append({"reason": reason, **operation})
+            if not dry_run:
+                for issue_key in issue_keys:
+                    operation_hash = self._operation_hash(
+                        result.runId, issue_key, "review", {"reason": reason, **operation}
+                    )
+                    record_intent(issue_key, operation_hash)
+                    self._add_label(issue_key, jira_config["review_label"])
+                    mark_known_update(issue_key)
+
+        def record_applied(operation: dict) -> None:
+            report["wouldApply" if dry_run else "applied"].append(operation)
+
+        for value in result.ticketValues:
+            operation = {"type": "businessValue", "issueKey": value.issueKey}
+            if value.confidence < confidence["business_value"]:
+                require_review([value.issueKey], "confidence-below-threshold", operation)
+                continue
+            current = fresh(value.issueKey)
+            recorded = provenance(value.issueKey)
+            operation_hash = self._operation_hash(
+                result.runId,
+                value.issueKey,
+                "businessValue",
+                {"score": value.score, "rationale": value.rationale},
+            )
+            current_score = current.get("businessValue", {}).get("score")
+            current_rationale = current.get("businessValue", {}).get("rationale")
+            if (
+                operation_hash in recorded.get("operationHashes", [])
+                and current_score == value.score
+                and current_rationale == value.rationale
+            ):
+                mark_known_update(value.issueKey)
+                report["skipped"].append({"reason": "value-already-applied", **operation})
+                continue
+            if stale(value.issueKey):
+                require_review([value.issueKey], "ticket-changed-since-snapshot", operation)
+                continue
+            previous = recorded.get("businessValue", {})
+            protected = (
+                (current_score is not None or current_rationale not in (None, ""))
+                and not (
+                    previous.get("score") == current_score
+                    and previous.get("rationale") == current_rationale
+                )
+            )
+            if protected:
+                require_review([value.issueKey], "human-value-protected", operation)
+                continue
+            if not dry_run:
+                recorded["businessValue"] = {
+                    "score": value.score,
+                    "rationale": value.rationale,
+                    "runId": result.runId,
+                }
+                record_intent(value.issueKey, operation_hash)
+                self._update_issue_fields(
+                    value.issueKey,
+                    {
+                        jira_config["business_value_score_field"]: value.score,
+                        jira_config["business_value_rationale_field"]: value.rationale,
+                    },
+                )
+                mark_known_update(value.issueKey)
+            record_applied(operation | {"score": value.score})
+
+        for dependency in result.dependencies:
+            operation = {
+                "type": "dependency",
+                "blocker": dependency.blocker,
+                "blocked": dependency.blocked,
+            }
+            targets = [dependency.blocker, dependency.blocked]
+            if dependency.confidence < confidence["dependency"]:
+                require_review(targets, "confidence-below-threshold", operation)
+                continue
+            if (dependency.blocker, dependency.blocked) in cyclic_pairs:
+                require_review(targets, "dependency-cycle", operation)
+                continue
+            operation_hash = self._operation_hash(
+                result.runId,
+                dependency.blocker,
+                "dependency",
+                [dependency.blocker, dependency.blocked],
+            )
+            if self._has_blocking_link(fresh(dependency.blocker), dependency.blocked):
+                if all(operation_hash in provenance(key).get("operationHashes", []) for key in targets):
+                    for key in targets:
+                        mark_known_update(key)
+                report["skipped"].append({"reason": "link-already-exists", **operation})
+                continue
+            if any(stale(key) for key in targets):
+                require_review(targets, "ticket-changed-since-snapshot", operation)
+                continue
+            if not dry_run:
+                for key in targets:
+                    record_intent(key, operation_hash)
+                self._create_issue_link(
+                    dependency.blocker,
+                    dependency.blocked,
+                    jira_config["dependency_link_type"],
+                )
+                for key in targets:
+                    mark_known_update(key)
+            record_applied(operation)
+
+        for clarification in result.clarifications:
+            operation = {"type": "clarification", "issueKey": clarification.issueKey}
+            if clarification.confidence < confidence["clarification"]:
+                require_review([clarification.issueKey], "confidence-below-threshold", operation)
+                continue
+            questions = [question.strip() for question in clarification.questions]
+            operation_hash = self._operation_hash(
+                result.runId,
+                clarification.issueKey,
+                "clarification",
+                questions,
+            )
+            marker = f"[symphony-backlog-curator:{operation_hash}]"
+            if self._comment_contains(clarification.issueKey, marker):
+                if operation_hash in provenance(clarification.issueKey).get("operationHashes", []):
+                    mark_known_update(clarification.issueKey)
+                report["skipped"].append({"reason": "clarification-already-posted", **operation})
+                continue
+            label_already_applied = (
+                operation_hash in provenance(clarification.issueKey).get("operationHashes", [])
+                and jira_config["clarification_label"] in fresh(clarification.issueKey).get("labels", [])
+            )
+            if label_already_applied:
+                # Recover a prior attempt that added the label but failed before
+                # (or while receiving the response from) the comment operation.
+                mark_known_update(clarification.issueKey)
+            if stale(clarification.issueKey):
+                require_review([clarification.issueKey], "ticket-changed-since-snapshot", operation)
+                continue
+            if not dry_run:
+                record_intent(clarification.issueKey, operation_hash)
+                if not label_already_applied:
+                    self._add_label(clarification.issueKey, jira_config["clarification_label"])
+                    mark_known_update(clarification.issueKey)
+                body = marker + "\nClarification requested:\n" + "\n".join(
+                    f"- {question}" for question in questions
+                )
+                if not self.add_comment(clarification.issueKey, body):
+                    raise RuntimeError(
+                        f"Failed to add clarification comment to {clarification.issueKey}"
+                    )
+                mark_known_update(clarification.issueKey)
+            record_applied(operation | {"questions": questions})
+
+        report_name = "backlog-curation-report.json"
+        report_path = os.path.join(phase_result.workspace_path, report_name)
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        if phase_result.execution.files is None:
+            phase_result.execution.files = []
+        if report_name not in phase_result.execution.files:
+            phase_result.execution.files.append(report_name)
+
+    def attach_curation_outputs(self, phase_result: PhaseResult) -> None:
+        """Attach run-qualified curator outputs without duplicating retry uploads."""
+        issue_key = phase_result.issue.get("identifier")
+        run_id = phase_result.issue.get("run_id")
+        if not isinstance(issue_key, str) or not issue_key.strip():
+            raise ValueError("Cannot attach curator outputs without an audit issue")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("Cannot attach curator outputs without a run id")
+        safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", run_id).strip("-")
+        existing = self._attachment_names(issue_key)
+        for source_name in phase_result.execution.files or []:
+            source_path = self._resolve_output_path(phase_result.workspace_path, source_name)
+            stem, extension = os.path.splitext(os.path.basename(source_name))
+            attachment_name = f"{stem}-{safe_run_id}{extension}"
+            if attachment_name in existing:
+                continue
+            attachment_path = os.path.join(phase_result.workspace_path, attachment_name)
+            shutil.copyfile(source_path, attachment_path)
+            self._upload_single_attachment(issue_key, attachment_name, attachment_path)
+            existing.add(attachment_name)
+
+    def _attachment_names(self, issue_key: str) -> set[str]:
+        encoded_key = quote(issue_key.strip(), safe="")
+        response = requests.get(
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}",
+            headers=self.headers,
+            auth=self.auth,
+            params={"fields": "attachment"},
+            timeout=self.request_timeout,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira attachment lookup failed for {issue_key} "
+                f"({response.status_code}): {response.text}"
+            )
+        payload = response.json()
+        fields = payload.get("fields") if isinstance(payload, dict) else None
+        attachments = fields.get("attachment") if isinstance(fields, dict) else None
+        if not isinstance(attachments, list):
+            raise ValueError("Jira attachment lookup must contain an attachment array")
+        return {
+            attachment["filename"]
+            for attachment in attachments
+            if isinstance(attachment, dict) and isinstance(attachment.get("filename"), str)
+        }
+
+    def _upload_single_attachment(
+        self,
+        issue_key: str,
+        name: str,
+        path: str,
+    ) -> None:
+        encoded_key = quote(issue_key.strip(), safe="")
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        with open(path, "rb") as handle:
+            response = requests.post(
+                f"{self.base_url}/rest/api/3/issue/{encoded_key}/attachments",
+                headers={"Accept": "application/json", "X-Atlassian-Token": "no-check"},
+                auth=self.auth,
+                files=[("file", (name, handle, content_type))],
+                timeout=self.request_timeout,
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira attachment upload failed for {issue_key} "
+                f"({response.status_code}): {response.text}"
+            )
 
     def fetch_attachment(self, issue_identifier: str, filename: str) -> bytes | None:
         """Download the newest Jira attachment with the requested filename."""
@@ -310,6 +677,93 @@ class JiraClient:
             )
             errors.append(f"jira.project_statuses: available Jira states: {available_states}")
             raise WorkflowStateValidationError(errors)
+        self._validate_scheduled_curation_targets(config)
+
+    def _validate_scheduled_curation_targets(self, config: dict[str, Any]) -> None:
+        scheduled = config.get("scheduled_phases", {})
+        enabled = [
+            (name, phase)
+            for name, phase in scheduled.items()
+            if isinstance(phase, dict) and phase.get("enabled", True) is not False
+        ] if isinstance(scheduled, dict) else []
+        if not enabled:
+            return
+
+        fields_response = requests.get(
+            f"{self.base_url}/rest/api/3/field",
+            headers=self.headers,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
+        if fields_response.status_code != 200:
+            raise WorkflowValidationError([
+                "jira.fields: failed to validate backlog-curation custom fields: "
+                f"{fields_response.status_code} {fields_response.text}"
+            ])
+        fields_payload = fields_response.json()
+        if not isinstance(fields_payload, list):
+            raise WorkflowValidationError(["jira.fields: Jira field response must be an array"])
+        available_fields = {
+            field.get("id")
+            for field in fields_payload
+            if isinstance(field, dict) and isinstance(field.get("id"), str)
+        }
+
+        link_response = requests.get(
+            f"{self.base_url}/rest/api/3/issueLinkType",
+            headers=self.headers,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
+        if link_response.status_code != 200:
+            raise WorkflowValidationError([
+                "jira.issue_link_types: failed to validate backlog-curation link type: "
+                f"{link_response.status_code} {link_response.text}"
+            ])
+        link_payload = link_response.json()
+        link_types = link_payload.get("issueLinkTypes") if isinstance(link_payload, dict) else None
+        if not isinstance(link_types, list):
+            raise WorkflowValidationError([
+                "jira.issue_link_types: Jira issue-link-type response must contain an array"
+            ])
+        available_link_types = {
+            link_type.get("name")
+            for link_type in link_types
+            if isinstance(link_type, dict) and isinstance(link_type.get("name"), str)
+        }
+
+        errors: list[str] = []
+        for phase_name, phase in enabled:
+            path = f"scheduled_phases.{phase_name}"
+            jira_config = phase["jira"]
+            field_ids = [
+                jira_config["business_value_score_field"],
+                jira_config["business_value_rationale_field"],
+            ]
+            if jira_config.get("epic_field"):
+                field_ids.append(jira_config["epic_field"])
+            for field_id in field_ids:
+                if field_id not in available_fields:
+                    errors.append(f"{path}.jira: unknown Jira field '{field_id}'")
+            link_type = jira_config["dependency_link_type"]
+            if link_type not in available_link_types:
+                errors.append(f"{path}.jira.dependency_link_type: unknown Jira link type '{link_type}'")
+
+            audit_issue = phase["audit_issue"]
+            audit_response = requests.get(
+                f"{self.base_url}/rest/api/3/issue/{quote(audit_issue, safe='')}",
+                headers=self.headers,
+                auth=self.auth,
+                params={"fields": "summary"},
+                timeout=self.request_timeout,
+            )
+            if audit_response.status_code != 200:
+                errors.append(
+                    f"{path}.audit_issue: Jira issue '{audit_issue}' is unavailable "
+                    f"({audit_response.status_code})"
+                )
+        if errors:
+            raise WorkflowValidationError(errors)
 
     def _normalize_issue(self, jira_issue: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -339,6 +793,324 @@ class JiraClient:
             "created_at": fields.get("created"),
             "updated_at": fields.get("updated")
         }
+
+    def _search_all(self, jql: str, fields: list[str]) -> list[dict[str, Any]]:
+        url = f"{self.base_url}/rest/api/3/search/jql"
+        next_page_token: str | None = None
+        start_at = 0
+        issues: list[dict[str, Any]] = []
+        while True:
+            params: dict[str, Any] = {
+                "jql": jql,
+                "maxResults": 100,
+                "fields": ",".join(fields),
+            }
+            if next_page_token:
+                params["nextPageToken"] = next_page_token
+            elif start_at:
+                params["startAt"] = start_at
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params=params,
+                    timeout=self.request_timeout,
+                )
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Jira backlog search request failed: {exc}") from exc
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Jira backlog search request failed ({response.status_code}): {response.text}"
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ValueError("Jira backlog search response is not valid JSON") from exc
+            page = payload.get("issues") if isinstance(payload, dict) else None
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise ValueError("Jira backlog search response must contain an issues array")
+            issues.extend(page)
+
+            token = payload.get("nextPageToken")
+            if isinstance(token, str) and token:
+                if token == next_page_token:
+                    raise ValueError("Jira backlog search pagination made no progress")
+                next_page_token = token
+                continue
+            if payload.get("isLast") is True:
+                break
+            total = payload.get("total")
+            page_start = payload.get("startAt", start_at)
+            if isinstance(total, int) and isinstance(page_start, int) and page_start + len(page) < total:
+                if not page:
+                    raise ValueError("Jira backlog search pagination made no progress")
+                start_at = page_start + len(page)
+                continue
+            break
+        return issues
+
+    def _normalize_curation_issue(
+        self,
+        jira_issue: dict[str, Any],
+        *,
+        score_field: str,
+        rationale_field: str,
+        epic_field: str | None = None,
+    ) -> dict[str, Any]:
+        fields = jira_issue.get("fields")
+        if not isinstance(fields, dict):
+            raise ValueError("Jira curation issue is missing fields")
+        key = jira_issue.get("key")
+        if not isinstance(key, str) or not key:
+            raise ValueError("Jira curation issue is missing a key")
+        links: list[dict[str, Any]] = []
+        for link in fields.get("issuelinks") or []:
+            if not isinstance(link, dict):
+                continue
+            link_type = link.get("type") if isinstance(link.get("type"), dict) else {}
+            if isinstance(link.get("outwardIssue"), dict):
+                linked_key = link["outwardIssue"].get("key")
+                direction = "outward"
+            elif isinstance(link.get("inwardIssue"), dict):
+                linked_key = link["inwardIssue"].get("key")
+                direction = "inward"
+            else:
+                continue
+            if isinstance(linked_key, str) and linked_key:
+                links.append(
+                    {
+                        "type": link_type.get("name"),
+                        "direction": direction,
+                        "issueKey": linked_key,
+                    }
+                )
+        parent = fields.get("parent") if isinstance(fields.get("parent"), dict) else {}
+        return {
+            "id": str(jira_issue.get("id", "")),
+            "key": key,
+            "summary": fields.get("summary"),
+            "description": fields.get("description"),
+            "issueType": (fields.get("issuetype") or {}).get("name"),
+            "components": [
+                component.get("name")
+                for component in fields.get("components") or []
+                if isinstance(component, dict) and isinstance(component.get("name"), str)
+            ],
+            "priority": (fields.get("priority") or {}).get("name"),
+            "status": (fields.get("status") or {}).get("name"),
+            "labels": [str(label) for label in fields.get("labels") or []],
+            "links": links,
+            "parentKey": parent.get("key"),
+            "epic": fields.get(epic_field) if epic_field else None,
+            "businessValue": {
+                "score": fields.get(score_field),
+                "rationale": fields.get(rationale_field),
+            },
+            "created": fields.get("created"),
+            "updated": fields.get("updated"),
+        }
+
+    def _fetch_curation_issue(
+        self,
+        issue_key: str,
+        score_field: str,
+        rationale_field: str,
+    ) -> dict[str, Any]:
+        encoded_key = quote(issue_key.strip(), safe="")
+        url = f"{self.base_url}/rest/api/3/issue/{encoded_key}"
+        fields = [
+            "summary", "description", "issuetype", "components", "priority",
+            "status", "labels", "issuelinks", "parent", "created", "updated",
+            score_field, rationale_field,
+        ]
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                params={"fields": ",".join(fields)},
+                timeout=self.request_timeout,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Jira issue refresh failed for {issue_key}: {exc}") from exc
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira issue refresh failed for {issue_key} ({response.status_code}): {response.text}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError(f"Jira issue refresh for {issue_key} is not valid JSON") from exc
+        return self._normalize_curation_issue(
+            payload,
+            score_field=score_field,
+            rationale_field=rationale_field,
+            epic_field=None,
+        )
+
+    def _update_issue_fields(self, issue_key: str, fields: dict[str, Any]) -> None:
+        encoded_key = quote(issue_key.strip(), safe="")
+        response = requests.put(
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}",
+            headers={**self.headers, "Content-Type": "application/json"},
+            auth=self.auth,
+            json={"fields": fields},
+            timeout=self.request_timeout,
+        )
+        if response.status_code != 204:
+            raise RuntimeError(
+                f"Jira issue update failed for {issue_key} ({response.status_code}): {response.text}"
+            )
+
+    def _add_label(self, issue_key: str, label: str) -> None:
+        encoded_key = quote(issue_key.strip(), safe="")
+        response = requests.put(
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}",
+            headers={**self.headers, "Content-Type": "application/json"},
+            auth=self.auth,
+            json={"update": {"labels": [{"add": label}]}},
+            timeout=self.request_timeout,
+        )
+        if response.status_code != 204:
+            # Jira's label add operation is idempotent for a value already present.
+            raise RuntimeError(
+                f"Jira label update failed for {issue_key} ({response.status_code}): {response.text}"
+            )
+
+    def _create_issue_link(
+        self,
+        blocker: str,
+        blocked: str,
+        link_type: str,
+    ) -> None:
+        response = requests.post(
+            f"{self.base_url}/rest/api/3/issueLink",
+            headers={**self.headers, "Content-Type": "application/json"},
+            auth=self.auth,
+            json={
+                "type": {"name": link_type},
+                "outwardIssue": {"key": blocker},
+                "inwardIssue": {"key": blocked},
+            },
+            timeout=self.request_timeout,
+        )
+        if response.status_code not in (200, 201, 204):
+            raise RuntimeError(
+                f"Jira issue link failed for {blocker}->{blocked} "
+                f"({response.status_code}): {response.text}"
+            )
+
+    @staticmethod
+    def _has_blocking_link(issue: dict[str, Any], blocked_key: str) -> bool:
+        return any(
+            link.get("type") == "Blocks"
+            and link.get("direction") == "outward"
+            and link.get("issueKey") == blocked_key
+            for link in issue.get("links", [])
+            if isinstance(link, dict)
+        )
+
+    def _get_curator_property(self, issue_key: str) -> dict[str, Any]:
+        encoded_key = quote(issue_key.strip(), safe="")
+        url = (
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}/properties/"
+            "symphony.backlog-curator"
+        )
+        response = requests.get(
+            url,
+            headers=self.headers,
+            auth=self.auth,
+            timeout=self.request_timeout,
+        )
+        if response.status_code == 404:
+            return {}
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira curator property read failed for {issue_key} "
+                f"({response.status_code}): {response.text}"
+            )
+        payload = response.json()
+        value = payload.get("value") if isinstance(payload, dict) else None
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(f"Jira curator property for {issue_key} must be an object")
+        return value
+
+    def _put_curator_property(self, issue_key: str, value: dict[str, Any]) -> None:
+        encoded_key = quote(issue_key.strip(), safe="")
+        url = (
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}/properties/"
+            "symphony.backlog-curator"
+        )
+        response = requests.put(
+            url,
+            headers={**self.headers, "Content-Type": "application/json"},
+            auth=self.auth,
+            json=value,
+            timeout=self.request_timeout,
+        )
+        if response.status_code not in (200, 201, 204):
+            raise RuntimeError(
+                f"Jira curator property write failed for {issue_key} "
+                f"({response.status_code}): {response.text}"
+            )
+
+    def _record_curator_operation(self, issue_key: str, operation_hash: str) -> None:
+        provenance = self._get_curator_property(issue_key)
+        provenance["operationHashes"] = self._append_operation_hash(
+            provenance.get("operationHashes"), operation_hash
+        )
+        self._put_curator_property(issue_key, provenance)
+
+    @staticmethod
+    def _append_operation_hash(existing: Any, operation_hash: str) -> list[str]:
+        hashes = [item for item in existing if isinstance(item, str)] if isinstance(existing, list) else []
+        if operation_hash not in hashes:
+            hashes.append(operation_hash)
+        # Bound issue-property growth while retaining recent retry/audit history.
+        return hashes[-200:]
+
+    def _comment_contains(self, issue_key: str, marker: str) -> bool:
+        encoded_key = quote(issue_key.strip(), safe="")
+        response = requests.get(
+            f"{self.base_url}/rest/api/3/issue/{encoded_key}/comment",
+            headers=self.headers,
+            auth=self.auth,
+            params={"maxResults": 100, "orderBy": "-created"},
+            timeout=self.request_timeout,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Jira comment lookup failed for {issue_key} "
+                f"({response.status_code}): {response.text}"
+            )
+        payload = response.json()
+        comments = payload.get("comments") if isinstance(payload, dict) else None
+        if not isinstance(comments, list):
+            raise ValueError("Jira comment lookup response must contain a comments array")
+        return any(marker in self._adf_text(comment.get("body")) for comment in comments if isinstance(comment, dict))
+
+    @classmethod
+    def _adf_text(cls, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return " ".join(cls._adf_text(item) for item in value)
+        if isinstance(value, dict):
+            own = value.get("text") if isinstance(value.get("text"), str) else ""
+            return " ".join(part for part in (own, cls._adf_text(value.get("content", []))) if part)
+        return ""
+
+    @staticmethod
+    def _operation_hash(run_id: str, issue_key: str, kind: str, value: Any) -> str:
+        encoded = json.dumps(
+            [run_id, issue_key, kind, value],
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:20]
 
     def fetch_candidate_issues(self, active_states: List[str]) -> List[Dict[str, Any]]:
         """Return issues in the phase-configured states using the modern /jql endpoint."""

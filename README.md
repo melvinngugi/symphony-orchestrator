@@ -121,6 +121,55 @@ implementation dispatch, so the implementer updates the existing issue branch us
 the original plan plus current automated and human review feedback without receiving
 Jira or Bitbucket credentials.
 
+## Scheduled Backlog Curation
+
+`scheduled_phases` runs backlog-wide agents independently of issue workflow
+states. A daily schedule executes the latest due local-time window, including one
+missed window after downtime. Completed run IDs are stored in
+`WORKSPACE_ROOT/.scheduled-runs.json`, so the workspace volume must be persistent
+in production. Scheduled agents use an artifact-only workspace as their working
+directory and never clone the Bitbucket repository.
+
+The shipped `backlog_curation` phase is disabled until its audit issue and Jira
+custom-field IDs are configured. Enable it first with `dry_run: true`. Its input
+provider pages through the configured JQL, excludes the audit issue and ignore
+label, and optionally resolves exact Confluence page titles within configured
+spaces. Configure these under `input.strategy_pages` with `titles`, `space_keys`,
+and `fail_on_missing` (which defaults to `true`). Duplicate titles in different
+configured spaces are all included. An empty title list disables Confluence
+enrichment and does not require Confluence credentials. Jira and Confluence
+credentials stay in the host process; the agent sees only normalized JSON.
+Confluence content is marked as untrusted reference data.
+
+The `backlog_curator` agent emits `backlog-curation.json`, validated against the
+scope, source snapshot, evidence references, score weights, and domain schema
+before any Jira write. `jira:apply-backlog-curation` then:
+
+- applies only findings meeting the configured confidence threshold;
+- refetches issue timestamps and routes stale findings to review;
+- preserves human-edited value fields using a Jira issue-property provenance record;
+- creates only missing, additive `Blocks` links and routes cycles to review;
+- adds deduplicated clarification questions and configured labels; and
+- writes `backlog-curation-report.json` with applied, proposed, skipped, and
+  review-required operations.
+
+`jira:attach-curation-outputs` gives audit attachments deterministic run-qualified
+filenames and checks existing attachments before uploading, making action retries
+idempotent. Scheduled completion transitions contain only `do`; they do not change
+the audit issue's status. The Jira account needs Browse Projects, Link Issues, Edit
+Issues, Add Comments, and Create Attachments permissions. Configure Confluence
+credentials with view-only access to the configured strategy spaces. At startup,
+enabled curator schedules resolve their configured spaces and titles; strict
+lookup prevents scheduling when any title is missing. With `fail_on_missing:
+false`, missing titles are logged and pages that were found remain available.
+
+The read-only Confluence adapter also exposes generic
+`fetch_documents_by_name(...)` and `fetch_documents_by_id(...)` batch APIs. ID
+lookup preserves caller order while removing repeated IDs. Title lookup is
+exact and case-sensitive, searches only the configured spaces, and returns all
+matching pages (including same-title pages from different spaces) once per page
+ID.
+
 Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
 
 ## Startup Workflow Validation
@@ -187,6 +236,11 @@ reachable from a particular issue state remains a runtime concern.
    JIRA_USER_EMAIL="your-email@example.com"
    JIRA_API_TOKEN="your-atlassian-api-token"
    JIRA_PROJECT_KEY="your-key"
+
+   # Confluence strategy context (required only when strategy_pages.titles is non-empty)
+   CONFLUENCE_HOST="https://your-domain.atlassian.net"
+   CONFLUENCE_USER_EMAIL="your-email@example.com"
+   CONFLUENCE_API_TOKEN="your-read-only-atlassian-api-token"
 
    # Bitbucket Configuration
    BITBUCKET_WORKSPACE="your-workspace"

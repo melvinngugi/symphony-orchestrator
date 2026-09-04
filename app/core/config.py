@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     JIRA_USER_EMAIL: str = os.getenv("JIRA_USER_EMAIL", "")
     JIRA_API_TOKEN: str = os.getenv("JIRA_API_TOKEN", "")
     JIRA_PROJECT_KEY: str = os.getenv("JIRA_PROJECT_KEY", "")
+
+    # Confluence Settings (read-only strategy context)
+    CONFLUENCE_HOST: str = os.getenv("CONFLUENCE_HOST", "")
+    CONFLUENCE_USER_EMAIL: str = os.getenv("CONFLUENCE_USER_EMAIL", "")
+    CONFLUENCE_API_TOKEN: str = os.getenv("CONFLUENCE_API_TOKEN", "")
     
     # Bitbucket Settings
     BITBUCKET_WORKSPACE: str = os.getenv("BITBUCKET_WORKSPACE", "")
@@ -40,6 +45,17 @@ class Settings(BaseSettings):
     def validate_jira(self):
         if not all([self.JIRA_HOST, self.JIRA_USER_EMAIL, self.JIRA_API_TOKEN, self.JIRA_PROJECT_KEY]):
             raise ValueError("Missing one or more critical JIRA configuration variables in .env")
+
+    def validate_confluence(self):
+        if not all([
+            self.CONFLUENCE_HOST,
+            self.CONFLUENCE_USER_EMAIL,
+            self.CONFLUENCE_API_TOKEN,
+        ]):
+            raise ValueError(
+                "Missing one or more Confluence configuration variables: "
+                "CONFLUENCE_HOST, CONFLUENCE_USER_EMAIL, CONFLUENCE_API_TOKEN"
+            )
 
     def validate_bitbucket(self):
         if not all([self.BITBUCKET_WORKSPACE, self.BITBUCKET_REPO_SLUG, self.BITBUCKET_USER_EMAIL, self.BITBUCKET_API_TOKEN]):

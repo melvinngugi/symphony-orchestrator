@@ -30,7 +30,7 @@ class BlockedTicketDetail:
 @dataclass
 class PendingTransitionDetail:
     phase_result: "PhaseResult"
-    target_state: str
+    target_state: Optional[str]
     actions: List[str] = field(default_factory=list)
     next_action_index: int = 0
     comment_attempted: bool = False
