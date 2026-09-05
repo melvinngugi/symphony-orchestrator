@@ -133,13 +133,15 @@ directory and never clone the Bitbucket repository.
 The shipped `backlog_curation` phase is disabled until its audit issue and Jira
 custom-field IDs are configured. Enable it first with `dry_run: true`. Its input
 provider pages through the configured JQL, excludes the audit issue and ignore
-label, and optionally resolves exact Confluence page titles within configured
-spaces. Configure these under `input.strategy_pages` with `titles`, `space_keys`,
-and `fail_on_missing` (which defaults to `true`). Duplicate titles in different
-configured spaces are all included. An empty title list disables Confluence
-enrichment and does not require Confluence credentials. Jira and Confluence
-credentials stay in the host process; the agent sees only normalized JSON.
-Confluence content is marked as untrusted reference data.
+label, and optionally resolves Confluence strategy documents by exact title or
+URL. Configure these under `input.strategy_pages` with `titles`, `urls`,
+`space_keys`, and `fail_on_missing` (which defaults to `true`). Titles are searched
+only in the configured spaces. Same-host URLs may identify a page directly, use
+`/wiki/pages/viewpage.action?pageId=...`, or identify a space overview whose
+homepage is loaded as the strategy document. Mixed results are deduplicated by
+page ID. Empty title and URL lists disable Confluence enrichment and require no
+Confluence credentials. Jira and Confluence credentials stay in the host process;
+the agent sees only normalized JSON marked as untrusted reference data.
 
 The `backlog_curator` agent emits `backlog-curation.json`, validated against the
 scope, source snapshot, evidence references, score weights, and domain schema
@@ -159,16 +161,18 @@ idempotent. Scheduled completion transitions contain only `do`; they do not chan
 the audit issue's status. The Jira account needs Browse Projects, Link Issues, Edit
 Issues, Add Comments, and Create Attachments permissions. Configure Confluence
 credentials with view-only access to the configured strategy spaces. At startup,
-enabled curator schedules resolve their configured spaces and titles; strict
-lookup prevents scheduling when any title is missing. With `fail_on_missing:
-false`, missing titles are logged and pages that were found remain available.
+enabled curator schedules resolve their configured spaces, titles, and URLs.
+Explicit URL references are always strict. With `fail_on_missing: false`, missing
+titles are logged and pages that were found remain available.
 
 The read-only Confluence adapter also exposes generic
-`fetch_documents_by_name(...)` and `fetch_documents_by_id(...)` batch APIs. ID
-lookup preserves caller order while removing repeated IDs. Title lookup is
-exact and case-sensitive, searches only the configured spaces, and returns all
-matching pages (including same-title pages from different spaces) once per page
-ID.
+`fetch_documents_by_name(...)`, `fetch_documents_by_url(...)`, and
+`fetch_documents_by_id(...)` batch APIs. ID and URL lookup preserve caller order
+while removing repeated page IDs. Title lookup is exact and case-sensitive,
+searches only configured spaces, and returns all matching pages—including
+same-title pages from different spaces—once per page ID. Configured URLs are
+parsed locally and must match `CONFLUENCE_HOST`; credentials are never sent to a
+configured URL or another host.
 
 Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
 
@@ -237,7 +241,7 @@ reachable from a particular issue state remains a runtime concern.
    JIRA_API_TOKEN="your-atlassian-api-token"
    JIRA_PROJECT_KEY="your-key"
 
-   # Confluence strategy context (required only when strategy_pages.titles is non-empty)
+   # Required only when strategy_pages.titles or strategy_pages.urls is non-empty
    CONFLUENCE_HOST="https://your-domain.atlassian.net"
    CONFLUENCE_USER_EMAIL="your-email@example.com"
    CONFLUENCE_API_TOKEN="your-read-only-atlassian-api-token"

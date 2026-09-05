@@ -40,6 +40,34 @@ class DocumentProvider(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
+    def fetch_documents_by_url(
+        self,
+        document_urls: list[str],
+    ) -> list[dict[str, Any]]:
+        ...
+
+
+def fetch_strategy_documents(
+    document_provider: DocumentProvider,
+    strategy_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve title and URL strategy references and deduplicate by page ID."""
+    titles = list(strategy_config.get("titles", []))
+    urls = list(strategy_config.get("urls", []))
+    documents = document_provider.fetch_documents_by_name(titles) if titles else []
+    if urls:
+        documents.extend(document_provider.fetch_documents_by_url(urls))
+    unique_documents: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for document in documents:
+        page_id = document.get("id") if isinstance(document, dict) else None
+        if not isinstance(page_id, str) or not page_id:
+            raise ValueError("Confluence strategy document is missing an id")
+        if page_id not in seen_ids:
+            unique_documents.append(document)
+            seen_ids.add(page_id)
+    return unique_documents
+
 
 class BacklogCurationInputProvider:
     def __init__(
@@ -71,12 +99,13 @@ class BacklogCurationInputProvider:
         )
         strategy_config = input_config.get("strategy_pages", {})
         titles = list(strategy_config.get("titles", []))
+        urls = list(strategy_config.get("urls", []))
         documents: list[dict[str, Any]] = []
-        if titles:
+        if titles or urls:
             document_provider = self.document_providers.get(schedule_name)
             if document_provider is None:
                 raise ValueError("Confluence strategy context is configured but unavailable")
-            documents = document_provider.fetch_documents_by_name(titles)
+            documents = fetch_strategy_documents(document_provider, strategy_config)
 
         weights = input_config.get("scoring_weights", DEFAULT_WEIGHTS)
         payload = {

@@ -73,6 +73,135 @@ def test_fetch_documents_by_id_propagates_missing_page(monkeypatch):
         ConfluenceClient([]).fetch_documents_by_id(["missing"])
 
 
+def test_fetch_documents_by_url_supports_page_url_forms_and_deduplicates(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        return _response(_page(url.rsplit("/", 1)[-1]))
+
+    monkeypatch.setattr(confluence_module.requests, "get", fake_get)
+    documents = ConfluenceClient([]).fetch_documents_by_url(
+        [
+            "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Product+Strategy?mode=view#goal",
+            "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=7&src=bookmark",
+            "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=42",
+        ]
+    )
+
+    assert [document["id"] for document in documents] == ["42", "7"]
+    assert [url for url, _params in calls] == [
+        "https://example.atlassian.net/wiki/api/v2/pages/42",
+        "https://example.atlassian.net/wiki/api/v2/pages/7",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("url_space_key", "resolved_space_key"),
+    [("DeltaFlow", "DeltaFlow"), ("Delta%20Flow", "Delta Flow")],
+)
+def test_fetch_documents_by_url_resolves_space_overview_and_decodes_key(
+    monkeypatch, url_space_key, resolved_space_key
+):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        params = kwargs.get("params")
+        calls.append((url, params))
+        if url.endswith("/spaces"):
+            assert params == {"keys": resolved_space_key, "limit": 25}
+            return _response(
+                {
+                    "results": [
+                        {
+                            "id": "space-1",
+                            "key": resolved_space_key,
+                            "homepageId": "99",
+                        }
+                    ]
+                }
+            )
+        assert url.endswith("/wiki/api/v2/pages/99")
+        return _response(_page("99", "DeltaFlow"))
+
+    monkeypatch.setattr(confluence_module.requests, "get", fake_get)
+    documents = ConfluenceClient([]).fetch_documents_by_url(
+        [
+            f"https://example.atlassian.net/wiki/spaces/{url_space_key}/overview?mode=view#top"
+        ]
+    )
+
+    assert [document["id"] for document in documents] == ["99"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "configured_url",
+    [
+        "https://other.atlassian.net/wiki/spaces/STRATEGY/pages/42/Strategy",
+        "http://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Strategy",
+        "https://example.atlassian.net:444/wiki/spaces/STRATEGY/pages/42/Strategy",
+        "https://user@example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Strategy",
+        "https://example.atlassian.net/wiki/x/AbCd",
+        "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/not-an-id/Strategy",
+        "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=not-an-id",
+        "/wiki/spaces/STRATEGY/pages/42/Strategy",
+    ],
+)
+def test_fetch_documents_by_url_rejects_untrusted_or_unsupported_urls(
+    monkeypatch, configured_url
+):
+    monkeypatch.setattr(
+        confluence_module.requests,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("Invalid URLs must not trigger requests"),
+    )
+
+    with pytest.raises(ValueError):
+        ConfluenceClient([]).fetch_documents_by_url([configured_url])
+
+
+def test_fetch_documents_by_url_propagates_missing_page(monkeypatch):
+    monkeypatch.setattr(
+        confluence_module.requests,
+        "get",
+        lambda *_args, **_kwargs: _response({}, status_code=404),
+    )
+
+    with pytest.raises(RuntimeError, match=r"Confluence request failed \(404\)"):
+        ConfluenceClient([]).fetch_documents_by_url(
+            ["https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Strategy"]
+        )
+
+
+def test_fetch_documents_by_url_rejects_unknown_space(monkeypatch):
+    monkeypatch.setattr(
+        confluence_module.requests,
+        "get",
+        lambda *_args, **_kwargs: _response({"results": []}),
+    )
+
+    with pytest.raises(ValueError, match="was not uniquely resolved"):
+        ConfluenceClient([]).fetch_documents_by_url(
+            ["https://example.atlassian.net/wiki/spaces/UNKNOWN/overview"]
+        )
+
+
+def test_fetch_documents_by_url_rejects_space_without_homepage(monkeypatch):
+    monkeypatch.setattr(
+        confluence_module.requests,
+        "get",
+        lambda *_args, **_kwargs: _response(
+            {"results": [{"id": "space-1", "key": "EMPTY"}]}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="has no valid homepage id"):
+        ConfluenceClient([]).fetch_documents_by_url(
+            ["https://example.atlassian.net/wiki/spaces/EMPTY/overview"]
+        )
+
+
 def test_fetch_documents_by_name_resolves_spaces_paginates_and_fetches_full_pages(
     monkeypatch,
 ):
@@ -82,7 +211,13 @@ def test_fetch_documents_by_name_resolves_spaces_paginates_and_fetches_full_page
         params = kwargs.get("params")
         calls.append((url, params))
         if url.endswith("/wiki/api/v2/spaces"):
-            return _response({"results": [{"id": f"space-{params['keys']}"}]})
+            return _response(
+                {
+                    "results": [
+                        {"id": f"space-{params['keys']}", "key": params["keys"]}
+                    ]
+                }
+            )
         if url.endswith("/wiki/api/v2/pages"):
             assert params == {
                 "title": "Product Strategy",
@@ -115,11 +250,57 @@ def test_fetch_documents_by_name_resolves_spaces_paginates_and_fetches_full_page
     assert any("cursor=next" in url for url, _params in calls)
 
 
+def test_title_and_overview_resolution_share_cached_space_metadata(monkeypatch):
+    space_calls = 0
+
+    def fake_get(url, **kwargs):
+        nonlocal space_calls
+        params = kwargs.get("params")
+        if url.endswith("/spaces"):
+            space_calls += 1
+            return _response(
+                {
+                    "results": [
+                        {
+                            "id": "space-1",
+                            "key": "DeltaFlow",
+                            "homepageId": "99",
+                        }
+                    ]
+                }
+            )
+        if url.endswith("/pages"):
+            assert params["space-id"] == ["space-1"]
+            return _response({"results": [{"id": "42", "title": "Strategy"}]})
+        page_id = url.rsplit("/", 1)[-1]
+        return _response(_page(page_id))
+
+    monkeypatch.setattr(confluence_module.requests, "get", fake_get)
+    client = ConfluenceClient(["DeltaFlow"])
+
+    assert [item["id"] for item in client.fetch_documents_by_name(["Strategy"])] == [
+        "42"
+    ]
+    assert [
+        item["id"]
+        for item in client.fetch_documents_by_url(
+            ["https://example.atlassian.net/wiki/spaces/DeltaFlow/overview"]
+        )
+    ] == ["99"]
+    assert space_calls == 1
+
+
 def test_duplicate_exact_titles_across_spaces_are_returned_once_by_page_id(monkeypatch):
     def fake_get(url, **kwargs):
         params = kwargs.get("params")
         if url.endswith("/spaces"):
-            return _response({"results": [{"id": f"space-{params['keys']}"}]})
+            return _response(
+                {
+                    "results": [
+                        {"id": f"space-{params['keys']}", "key": params["keys"]}
+                    ]
+                }
+            )
         if url.endswith("/pages"):
             return _response(
                 {
@@ -140,9 +321,11 @@ def test_duplicate_exact_titles_across_spaces_are_returned_once_by_page_id(monke
 
 
 def test_missing_titles_fail_by_default(monkeypatch):
-    def fake_get(url, **_kwargs):
+    def fake_get(url, **kwargs):
         if url.endswith("/spaces"):
-            return _response({"results": [{"id": "space-1"}]})
+            return _response(
+                {"results": [{"id": "space-1", "key": kwargs["params"]["keys"]}]}
+            )
         return _response({"results": []})
 
     monkeypatch.setattr(confluence_module.requests, "get", fake_get)
@@ -154,7 +337,9 @@ def test_missing_titles_warn_once_when_non_strict(monkeypatch, caplog):
     def fake_get(url, **kwargs):
         params = kwargs.get("params")
         if url.endswith("/spaces"):
-            return _response({"results": [{"id": "space-1"}]})
+            return _response(
+                {"results": [{"id": "space-1", "key": params["keys"]}]}
+            )
         if url.endswith("/pages"):
             results = (
                 [{"id": "42", "title": "Strategy"}]

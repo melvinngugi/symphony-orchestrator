@@ -25,7 +25,7 @@ from app.services.agent import (
 )
 from app.services.bitbucket import BitbucketService
 from app.services.jira import JiraClient
-from app.services.backlog import BacklogCurationInputProvider
+from app.services.backlog import BacklogCurationInputProvider, fetch_strategy_documents
 from app.services.confluence import ConfluenceClient
 from app.models.usage import UsageSnapshot
 from app.services.usage import CodexUsageCollector
@@ -81,13 +81,14 @@ def create_scheduled_document_providers(
     for phase_name, phase in enabled_schedules:
         strategy_pages = phase["input"]["strategy_pages"]
         titles = strategy_pages.get("titles", [])
-        if not titles:
+        urls = strategy_pages.get("urls", [])
+        if not titles and not urls:
             continue
         provider = ConfluenceClient(
             space_keys=strategy_pages["space_keys"],
             fail_on_missing_documents=strategy_pages.get("fail_on_missing", True),
         )
-        provider.fetch_documents_by_name(titles)
+        fetch_strategy_documents(provider, strategy_pages)
         providers[phase_name] = provider
     return providers
 

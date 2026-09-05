@@ -24,6 +24,7 @@ def _scheduled_config(action="test:record"):
                     "ignore_label": "backlog-curation-ignore",
                     "strategy_pages": {
                         "titles": [],
+                        "urls": [],
                         "space_keys": [],
                         "fail_on_missing": True,
                     },

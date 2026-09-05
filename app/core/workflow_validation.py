@@ -303,13 +303,18 @@ def _inspect_backlog_curation_config(
         if not isinstance(strategy_pages, dict):
             errors.append(f"{path}.input.strategy_pages: must be a mapping")
         else:
-            allowed_strategy_fields = {"titles", "space_keys", "fail_on_missing"}
+            allowed_strategy_fields = {
+                "titles",
+                "urls",
+                "space_keys",
+                "fail_on_missing",
+            }
             extra_fields = sorted(set(strategy_pages) - allowed_strategy_fields)
             for field_name in extra_fields:
                 errors.append(
                     f"{path}.input.strategy_pages.{field_name}: unknown configuration field"
                 )
-            for list_name in ("titles", "space_keys"):
+            for list_name in ("titles", "urls", "space_keys"):
                 values = strategy_pages.get(list_name, [])
                 if not isinstance(values, list) or any(
                     _non_empty_string(value) is None for value in values

@@ -26,6 +26,7 @@ scheduled_phases:
       ignore_label: "backlog-curation-ignore"
       strategy_pages:
         titles: []
+        urls: []
         space_keys: []
         fail_on_missing: true
       scoring_weights:

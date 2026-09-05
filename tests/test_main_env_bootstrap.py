@@ -210,7 +210,7 @@ def test_missing_selected_workflow_fails_before_external_services(
     assert str(workflow_path) in caplog.text
 
 
-def test_empty_strategy_titles_create_no_confluence_client(monkeypatch):
+def test_empty_strategy_references_create_no_confluence_client(monkeypatch):
     monkeypatch.setattr(
         main,
         "ConfluenceClient",
@@ -225,6 +225,7 @@ def test_empty_strategy_titles_create_no_confluence_client(monkeypatch):
                     "input": {
                         "strategy_pages": {
                             "titles": [],
+                            "urls": [],
                             "space_keys": [],
                             "fail_on_missing": True,
                         }
@@ -250,6 +251,10 @@ def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
             self.fetched.append(names)
             return []
 
+        def fetch_documents_by_url(self, urls):
+            self.fetched.append(urls)
+            return []
+
     monkeypatch.setattr(main, "ConfluenceClient", FakeConfluenceClient)
     providers = main.create_scheduled_document_providers(
         [
@@ -270,8 +275,11 @@ def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
                 {
                     "input": {
                         "strategy_pages": {
-                            "titles": ["Strategy Two"],
-                            "space_keys": ["TWO"],
+                            "titles": [],
+                            "urls": [
+                                "https://example.atlassian.net/wiki/spaces/TWO/overview"
+                            ],
+                            "space_keys": [],
                         }
                     }
                 },
@@ -285,7 +293,13 @@ def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
         "fail_on_missing_documents": False,
     }
     assert created[0].fetched == [["Strategy One"]]
-    assert created[1].fetched == [["Strategy Two"]]
+    assert created[1].kwargs == {
+        "space_keys": [],
+        "fail_on_missing_documents": True,
+    }
+    assert created[1].fetched == [
+        ["https://example.atlassian.net/wiki/spaces/TWO/overview"],
+    ]
 
 
 def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypatch, caplog):

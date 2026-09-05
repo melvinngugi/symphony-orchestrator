@@ -158,6 +158,10 @@ def test_input_provider_fetches_strategy_documents_by_name():
         def fetch_documents_by_id(self, _ids):
             raise AssertionError("The curator must use title-based lookup")
 
+        def fetch_documents_by_url(self, urls):
+            assert urls == []
+            return []
+
     provider = BacklogCurationInputProvider(Tracker(), {"curation": Documents()})
     payload = json.loads(
         provider.build_input(
@@ -182,6 +186,61 @@ def test_input_provider_fetches_strategy_documents_by_name():
         {"id": "42", "title": "Product Strategy", "text": "Grow retention."}
     ]
     assert "untrusted reference data" in payload["contentPolicy"]
+
+
+def test_input_provider_combines_titles_and_urls_and_deduplicates_by_page_id():
+    class Tracker:
+        def fetch_backlog_issues(self, *_args, **_kwargs):
+            return [_ticket("SHOP-1")]
+
+    class Documents:
+        def fetch_documents_by_name(self, names):
+            assert names == ["Product Strategy"]
+            return [{"id": "42", "title": names[0], "text": "Title result"}]
+
+        def fetch_documents_by_id(self, _ids):
+            raise AssertionError("Strategy references use name and URL lookup")
+
+        def fetch_documents_by_url(self, urls):
+            assert urls == [
+                "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Product+Strategy",
+                "https://example.atlassian.net/wiki/spaces/PRODUCT/overview",
+            ]
+            return [
+                {"id": "42", "title": "Product Strategy", "text": "URL result"},
+                {"id": "99", "title": "Product Home", "text": "Goals"},
+            ]
+
+    provider = BacklogCurationInputProvider(Tracker(), {"curation": Documents()})
+    payload = json.loads(
+        provider.build_input(
+            "curation",
+            "curation:2026-09-03",
+            {
+                "audit_issue": "SHOP-CURATION",
+                "input": {
+                    "strategy_pages": {
+                        "titles": ["Product Strategy"],
+                        "urls": [
+                            "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Product+Strategy",
+                            "https://example.atlassian.net/wiki/spaces/PRODUCT/overview",
+                        ],
+                        "space_keys": ["STRATEGY"],
+                    }
+                },
+                "jira": {
+                    "business_value_score_field": "customfield_1",
+                    "business_value_rationale_field": "customfield_2",
+                },
+            },
+        )
+    )
+
+    assert [document["id"] for document in payload["strategyDocuments"]] == [
+        "42",
+        "99",
+    ]
+    assert payload["strategyDocuments"][0]["text"] == "Title result"
 
 
 def test_apply_curation_routes_confidence_cycles_and_clarifications(tmp_path):

@@ -150,6 +150,10 @@ def _adapter_actions():
             "titles: must be a list of non-empty strings",
         ),
         (
+            {"titles": [], "urls": "https://example.atlassian.net/wiki", "space_keys": []},
+            "urls: must be a list of non-empty strings",
+        ),
+        (
             {"titles": [], "space_keys": [], "fail_on_missing": "yes"},
             "fail_on_missing: must be a boolean",
         ),
@@ -175,3 +179,17 @@ def test_curator_rejects_replaced_confluence_fields():
 
     with pytest.raises(WorkflowValidationError, match="replaced by input.strategy_pages"):
         validate_workflow_config(config, _adapter_actions())
+
+
+def test_curator_accepts_urls_without_title_search_spaces():
+    config = _enabled_curator_config()
+    config["scheduled_phases"]["backlog_curation"]["input"]["strategy_pages"] = {
+        "titles": [],
+        "urls": [
+            "https://example.atlassian.net/wiki/spaces/STRATEGY/overview"
+        ],
+        "space_keys": [],
+        "fail_on_missing": True,
+    }
+
+    validate_workflow_config(config, _adapter_actions())
