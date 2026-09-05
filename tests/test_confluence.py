@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.config import ConfluenceProjectConfig, StrategyPagesConfig
 from app.services import confluence as confluence_module
 from app.services.confluence import ConfluenceClient
 
@@ -38,6 +39,17 @@ def _page(page_id, title="Strategy"):
         "body": {"storage": {"value": f"<h1>Goal {page_id}</h1><p>Grow retention.</p>"}},
         "version": {"number": 3, "createdAt": "2026-09-01"},
     }
+
+
+def test_client_uses_injected_project_host():
+    project = ConfluenceProjectConfig(
+        "https://injected.atlassian.net",
+        StrategyPagesConfig((), (), (), True),
+    )
+
+    client = ConfluenceClient([], project=project)
+
+    assert client.base_url == "https://injected.atlassian.net"
 
 
 def test_fetch_documents_by_id_preserves_order_deduplicates_and_normalizes(monkeypatch):

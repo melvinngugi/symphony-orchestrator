@@ -1,4 +1,8 @@
+import math
 import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 import yaml
@@ -71,6 +75,291 @@ class WorkflowConfigLoadError(ValueError):
         self.file_path = file_path
         self.reason = reason
         super().__init__(f"Unable to load workflow '{file_path}': {reason}")
+
+
+@dataclass(frozen=True)
+class JiraFieldsConfig:
+    business_value_score: str
+    business_value_rationale: str
+    epic: str = ""
+
+
+@dataclass(frozen=True)
+class JiraBacklogConfig:
+    jql: str
+    ignore_label: str
+
+
+@dataclass(frozen=True)
+class JiraProjectConfig:
+    host: str
+    key: str
+    fields: JiraFieldsConfig
+    backlog: JiraBacklogConfig
+
+
+@dataclass(frozen=True)
+class BitbucketProjectConfig:
+    workspace: str
+    repository: str
+
+
+@dataclass(frozen=True)
+class StrategyPagesConfig:
+    titles: tuple[str, ...]
+    urls: tuple[str, ...]
+    space_keys: tuple[str, ...]
+    fail_on_missing: bool
+
+
+@dataclass(frozen=True)
+class ConfluenceProjectConfig:
+    host: str
+    strategy_pages: StrategyPagesConfig
+
+
+@dataclass(frozen=True)
+class BusinessValueParameters:
+    scoring_weights: dict[str, float]
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    jira: JiraProjectConfig
+    bitbucket: BitbucketProjectConfig
+    confluence: ConfluenceProjectConfig
+    business_value_parameters: BusinessValueParameters
+
+
+class ProjectConfigLoadError(ValueError):
+    """Raised when project configuration is absent or invalid."""
+
+
+class ProjectCredentialValidationError(ValueError):
+    """Raised when a configured project integration lacks credentials."""
+
+
+def validate_project_credentials(project: ProjectConfig) -> None:
+    """Validate credentials needed by the integrations enabled for this project."""
+    strategy = project.confluence.strategy_pages
+    if not strategy.titles and not strategy.urls:
+        return
+
+    missing = [
+        name
+        for name, value in (
+            ("CONFLUENCE_USER_EMAIL", settings.CONFLUENCE_USER_EMAIL),
+            ("CONFLUENCE_API_TOKEN", settings.CONFLUENCE_API_TOKEN),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ProjectCredentialValidationError(
+            "Confluence strategy pages are configured, but required credentials "
+            f"are missing. Set {', '.join(missing)} in the environment."
+        )
+
+
+def _mapping(value: object, path: str, *, allowed: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProjectConfigLoadError(f"{path}: must be a mapping")
+    if any(not isinstance(key, str) for key in value):
+        raise ProjectConfigLoadError(f"{path}: field names must be strings")
+    extras = sorted(set(value) - allowed)
+    if extras:
+        raise ProjectConfigLoadError(
+            f"{path}.{extras[0]}: unknown configuration field"
+        )
+    return value
+
+
+def _configured_or_env(value: object, environment_name: str, path: str) -> str:
+    if value is not None and not isinstance(value, str):
+        raise ProjectConfigLoadError(f"{path}: must be a string")
+    configured = value.strip() if isinstance(value, str) else ""
+    resolved = configured or os.getenv(environment_name, "").strip()
+    if not resolved:
+        raise ProjectConfigLoadError(
+            f"{path}: must be a non-empty string or {environment_name} must be set"
+        )
+    return resolved
+
+
+def _string(value: object, path: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        qualifier = "a string" if allow_empty else "a non-empty string"
+        raise ProjectConfigLoadError(f"{path}: must be {qualifier}")
+    return value.strip()
+
+
+def _string_list(value: object, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ProjectConfigLoadError(f"{path}: must be a list of non-empty strings")
+    return tuple(item.strip() for item in value)
+
+
+def _jira_field(value: object, path: str, *, allow_empty: bool = False) -> str:
+    field = _string(value, path, allow_empty=allow_empty)
+    if field and re.fullmatch(r"customfield_\d+", field) is None:
+        raise ProjectConfigLoadError(f"{path}: must be a Jira customfield_<id>")
+    return field
+
+
+def _load_business_value_parameters(path: Path) -> BusinessValueParameters:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle)
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ProjectConfigLoadError(
+            f"project.business_value_parameters: unable to load '{path}': {exc}"
+        ) from exc
+    root = _mapping(payload, "business_value_parameters", allowed={"scoring_weights"})
+    weights = _mapping(
+        root.get("scoring_weights"),
+        "business_value_parameters.scoring_weights",
+        allowed={
+            "customerImpact",
+            "revenueOrCostImpact",
+            "strategicAlignment",
+            "riskReduction",
+        },
+    )
+    expected = {
+        "customerImpact",
+        "revenueOrCostImpact",
+        "strategicAlignment",
+        "riskReduction",
+    }
+    if set(weights) != expected:
+        raise ProjectConfigLoadError(
+            "business_value_parameters.scoring_weights: must define the four scoring dimensions"
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        for value in weights.values()
+    ) or abs(sum(float(value) for value in weights.values()) - 1.0) > 0.000001:
+        raise ProjectConfigLoadError(
+            "business_value_parameters.scoring_weights: values must be non-negative and sum to 1"
+        )
+    return BusinessValueParameters(
+        scoring_weights={name: float(value) for name, value in weights.items()}
+    )
+
+
+def load_project_config(config: dict[str, Any], workflow_path: str | Path) -> ProjectConfig:
+    """Load strict project configuration and resolve environment fallbacks."""
+    project = _mapping(
+        config.get("project"),
+        "project",
+        allowed={"jira", "bitbucket", "confluence", "business_value_parameters"},
+    )
+    jira = _mapping(
+        project.get("jira"),
+        "project.jira",
+        allowed={"host", "key", "fields", "backlog"},
+    )
+    fields = _mapping(
+        jira.get("fields"),
+        "project.jira.fields",
+        allowed={"business_value_score", "business_value_rationale", "epic"},
+    )
+    backlog = _mapping(
+        jira.get("backlog"),
+        "project.jira.backlog",
+        allowed={"jql", "ignore_label"},
+    )
+    bitbucket = _mapping(
+        project.get("bitbucket"),
+        "project.bitbucket",
+        allowed={"workspace", "repository"},
+    )
+    confluence = _mapping(
+        project.get("confluence"),
+        "project.confluence",
+        allowed={"host", "strategy_pages"},
+    )
+    strategy = _mapping(
+        confluence.get("strategy_pages"),
+        "project.confluence.strategy_pages",
+        allowed={"titles", "urls", "space_keys", "fail_on_missing"},
+    )
+
+    titles = _string_list(strategy.get("titles", []), "project.confluence.strategy_pages.titles")
+    urls = _string_list(strategy.get("urls", []), "project.confluence.strategy_pages.urls")
+    space_keys = _string_list(
+        strategy.get("space_keys", []), "project.confluence.strategy_pages.space_keys"
+    )
+    if titles and not space_keys:
+        raise ProjectConfigLoadError(
+            "project.confluence.strategy_pages.space_keys: must contain at least one space key when titles are configured"
+        )
+    fail_on_missing = strategy.get("fail_on_missing", True)
+    if not isinstance(fail_on_missing, bool):
+        raise ProjectConfigLoadError(
+            "project.confluence.strategy_pages.fail_on_missing: must be a boolean"
+        )
+
+    parameter_reference = _string(
+        project.get("business_value_parameters"),
+        "project.business_value_parameters",
+    )
+    parameter_path = Path(parameter_reference).expanduser()
+    if not parameter_path.is_absolute():
+        parameter_path = Path(workflow_path).resolve().parent / parameter_path
+
+    return ProjectConfig(
+        jira=JiraProjectConfig(
+            host=_configured_or_env(jira.get("host"), "JIRA_HOST", "project.jira.host"),
+            key=_configured_or_env(jira.get("key"), "JIRA_PROJECT_KEY", "project.jira.key"),
+            fields=JiraFieldsConfig(
+                business_value_score=_jira_field(
+                    fields.get("business_value_score"),
+                    "project.jira.fields.business_value_score",
+                ),
+                business_value_rationale=_jira_field(
+                    fields.get("business_value_rationale"),
+                    "project.jira.fields.business_value_rationale",
+                ),
+                epic=_jira_field(
+                    fields.get("epic", ""),
+                    "project.jira.fields.epic",
+                    allow_empty=True,
+                ),
+            ),
+            backlog=JiraBacklogConfig(
+                jql=_string(backlog.get("jql", ""), "project.jira.backlog.jql", allow_empty=True),
+                ignore_label=_string(
+                    backlog.get("ignore_label", "backlog-curation-ignore"),
+                    "project.jira.backlog.ignore_label",
+                ),
+            ),
+        ),
+        bitbucket=BitbucketProjectConfig(
+            workspace=_configured_or_env(
+                bitbucket.get("workspace"), "BITBUCKET_WORKSPACE", "project.bitbucket.workspace"
+            ),
+            repository=_configured_or_env(
+                bitbucket.get("repository"), "BITBUCKET_REPO_SLUG", "project.bitbucket.repository"
+            ),
+        ),
+        confluence=ConfluenceProjectConfig(
+            host=_configured_or_env(
+                confluence.get("host"), "CONFLUENCE_HOST", "project.confluence.host"
+            ),
+            strategy_pages=StrategyPagesConfig(
+                titles=titles,
+                urls=urls,
+                space_keys=space_keys,
+                fail_on_missing=fail_on_missing,
+            ),
+        ),
+        business_value_parameters=_load_business_value_parameters(parameter_path),
+    )
 
 
 def load_agents_config(file_path: str = "agents.yaml") -> AgentsRegistry:

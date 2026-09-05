@@ -13,6 +13,7 @@ RUN uv pip install --python /opt/venv/bin/python --no-cache --compile-bytecode -
 
 COPY app /app/app
 COPY WORKFLOW.md /app/WORKFLOW.md
+COPY business_value_parameters.yaml /app/business_value_parameters.yaml
 COPY agents.yaml /app/agents.yaml
 COPY agent-output-schema.json /app/agent-output-schema.json
 COPY backlog-curation-schema.json /app/backlog-curation-schema.json
@@ -42,6 +43,7 @@ RUN apt-get update \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/app /app/app
 COPY --from=builder /app/WORKFLOW.md /app/WORKFLOW.md
+COPY --from=builder /app/business_value_parameters.yaml /app/business_value_parameters.yaml
 COPY --from=builder /app/agents.yaml /app/agents.yaml
 COPY --from=builder /app/agent-output-schema.json /app/agent-output-schema.json
 COPY --from=builder /app/backlog-curation-schema.json /app/backlog-curation-schema.json

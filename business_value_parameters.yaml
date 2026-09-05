@@ -1,0 +1,5 @@
+scoring_weights:
+  customerImpact: 0.35
+  revenueOrCostImpact: 0.25
+  strategicAlignment: 0.25
+  riskReduction: 0.15

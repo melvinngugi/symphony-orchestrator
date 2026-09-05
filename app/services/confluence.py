@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import requests
 from requests.auth import HTTPBasicAuth
 
-from app.core.config import settings
+from app.core.config import ConfluenceProjectConfig, StrategyPagesConfig, settings
 
 
 logger = logging.getLogger("symphony.confluence")
@@ -31,8 +31,14 @@ class ConfluenceClient:
         self,
         space_keys: list[str],
         fail_on_missing_documents: bool = True,
+        project: ConfluenceProjectConfig | None = None,
     ):
-        settings.validate_confluence()
+        if not settings.CONFLUENCE_USER_EMAIL or not settings.CONFLUENCE_API_TOKEN:
+            raise ValueError("Missing Confluence user or API token in environment")
+        project = project or ConfluenceProjectConfig(
+            host=settings.CONFLUENCE_HOST,
+            strategy_pages=StrategyPagesConfig((), (), (), True),
+        )
         if not isinstance(space_keys, list) or any(
             not isinstance(key, str) or not key.strip() for key in space_keys
         ):
@@ -42,7 +48,7 @@ class ConfluenceClient:
         self.space_keys = self._deduplicate(value.strip() for value in space_keys)
         self.fail_on_missing_documents = fail_on_missing_documents
         self._spaces_by_key: dict[str, dict[str, str | None]] = {}
-        self.base_url = settings.CONFLUENCE_HOST.rstrip("/")
+        self.base_url = project.host.rstrip("/")
         self._base_origin = self._origin(self.base_url)
         self.auth = HTTPBasicAuth(
             settings.CONFLUENCE_USER_EMAIL,

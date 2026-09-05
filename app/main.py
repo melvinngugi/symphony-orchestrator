@@ -11,7 +11,16 @@ from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
-from app.core.config import WorkflowConfigLoadError, load_config, settings
+from app.core.config import (
+    ProjectConfig,
+    ProjectCredentialValidationError,
+    ProjectConfigLoadError,
+    WorkflowConfigLoadError,
+    load_config,
+    load_project_config,
+    settings,
+    validate_project_credentials,
+)
 from app.core.orchestrator import SymphonyOrchestrator
 from app.core.workflow_validation import (
     WorkflowStateValidationError,
@@ -64,6 +73,17 @@ def get_workflow_path() -> Path:
     return _workflow_path
 
 
+def validate_startup_configuration(
+    workflow_path: Path | None = None,
+) -> tuple[dict, ProjectConfig]:
+    """Load and validate local configuration before starting the server."""
+    selected_path = workflow_path or get_workflow_path()
+    config = load_config(str(selected_path))
+    project = load_project_config(config, selected_path)
+    validate_project_credentials(project)
+    return config, project
+
+
 def ensure_symphony_home() -> None:
     current_value = os.getenv("SYMPHONY_HOME", "")
     if current_value:
@@ -76,19 +96,25 @@ def ensure_symphony_home() -> None:
 
 def create_scheduled_document_providers(
     enabled_schedules: list[tuple[str, dict]],
+    project: ProjectConfig,
 ) -> dict[str, ConfluenceClient]:
     providers: dict[str, ConfluenceClient] = {}
+    strategy_pages = project.confluence.strategy_pages
+    strategy_config = {
+        "titles": list(strategy_pages.titles),
+        "urls": list(strategy_pages.urls),
+    }
     for phase_name, phase in enabled_schedules:
-        strategy_pages = phase["input"]["strategy_pages"]
-        titles = strategy_pages.get("titles", [])
-        urls = strategy_pages.get("urls", [])
+        titles = strategy_pages.titles
+        urls = strategy_pages.urls
         if not titles and not urls:
             continue
         provider = ConfluenceClient(
-            space_keys=strategy_pages["space_keys"],
-            fail_on_missing_documents=strategy_pages.get("fail_on_missing", True),
+            space_keys=list(strategy_pages.space_keys),
+            fail_on_missing_documents=strategy_pages.fail_on_missing,
+            project=project.confluence,
         )
-        fetch_strategy_documents(provider, strategy_pages)
+        fetch_strategy_documents(provider, strategy_config)
         providers[phase_name] = provider
     return providers
 
@@ -105,13 +131,16 @@ async def lifespan(_: FastAPI):
     workflow_path = get_workflow_path()
     logger.info("Loading workflow from %s", workflow_path)
     try:
-        config = load_config(str(workflow_path))
-    except WorkflowConfigLoadError as exc:
+        config, project = validate_startup_configuration(workflow_path)
+    except ProjectCredentialValidationError as exc:
+        logger.error("Configuration validation failed: %s", exc)
+        raise
+    except (WorkflowConfigLoadError, ProjectConfigLoadError) as exc:
         logger.error("Workflow loading failed: %s", exc)
         raise
     try:
-        tracker = JiraClient()
-        bitbucket = BitbucketService()
+        tracker = JiraClient(project.jira)
+        bitbucket = BitbucketService(project.bitbucket)
         action_registry = ActionRegistry()
         tracker.register_actions(action_registry)
         bitbucket.register_actions(action_registry)
@@ -141,10 +170,11 @@ async def lifespan(_: FastAPI):
             orchestrator_kwargs["scheduled_input_provider"] = BacklogCurationInputProvider(
                 tracker,
                 document_providers,
+                project,
             )
         orchestrator = SymphonyOrchestrator(config, **orchestrator_kwargs)
         document_providers.update(
-            create_scheduled_document_providers(enabled_schedules)
+            create_scheduled_document_providers(enabled_schedules, project)
         )
         global_orchestrator = orchestrator
     except WorkflowStateValidationError as exc:
@@ -273,8 +303,17 @@ def run(argv: Sequence[str] | None = None) -> None:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     configure_workflow_path(args.workflow)
-    logger.info("Starting Symphony Server...")
     ensure_symphony_home()
+    try:
+        validate_startup_configuration()
+    except (
+        WorkflowConfigLoadError,
+        ProjectConfigLoadError,
+        ProjectCredentialValidationError,
+    ) as exc:
+        logger.error("Configuration validation failed: %s", exc)
+        raise SystemExit(1) from None
+    logger.info("Starting Symphony Server...")
     # Execute this file to start both the background daemon and the UI on port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
 

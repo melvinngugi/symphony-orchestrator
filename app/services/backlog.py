@@ -4,6 +4,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.core.config import ProjectConfig
+
 
 DEFAULT_WEIGHTS = {
     "customerImpact": 0.35,
@@ -74,8 +76,10 @@ class BacklogCurationInputProvider:
         self,
         tracker: BacklogTracker,
         document_providers: dict[str, DocumentProvider] | None,
+        project: ProjectConfig,
     ):
         self.tracker = tracker
+        self.project = project
         self.document_providers = (
             document_providers if document_providers is not None else {}
         )
@@ -86,20 +90,24 @@ class BacklogCurationInputProvider:
         run_id: str,
         phase_config: dict,
     ) -> bytes:
-        input_config = phase_config["input"]
-        jira_config = phase_config["jira"]
-        jql = input_config.get("jql") or ""
+        jira_project = self.project.jira
+        backlog_config = jira_project.backlog
+        jql = backlog_config.jql
         tickets = self.tracker.fetch_backlog_issues(
             jql,
-            score_field=jira_config["business_value_score_field"],
-            rationale_field=jira_config["business_value_rationale_field"],
-            epic_field=jira_config.get("epic_field") or None,
+            score_field=jira_project.fields.business_value_score,
+            rationale_field=jira_project.fields.business_value_rationale,
+            epic_field=jira_project.fields.epic or None,
             audit_issue=phase_config["audit_issue"],
-            ignore_label=input_config.get("ignore_label", "backlog-curation-ignore"),
+            ignore_label=backlog_config.ignore_label,
         )
-        strategy_config = input_config.get("strategy_pages", {})
-        titles = list(strategy_config.get("titles", []))
-        urls = list(strategy_config.get("urls", []))
+        strategy = self.project.confluence.strategy_pages
+        strategy_config = {
+            "titles": list(strategy.titles),
+            "urls": list(strategy.urls),
+        }
+        titles = list(strategy.titles)
+        urls = list(strategy.urls)
         documents: list[dict[str, Any]] = []
         if titles or urls:
             document_provider = self.document_providers.get(schedule_name)
@@ -107,7 +115,7 @@ class BacklogCurationInputProvider:
                 raise ValueError("Confluence strategy context is configured but unavailable")
             documents = fetch_strategy_documents(document_provider, strategy_config)
 
-        weights = input_config.get("scoring_weights", DEFAULT_WEIGHTS)
+        weights = self.project.business_value_parameters.scoring_weights
         payload = {
             "runId": run_id,
             "schedule": schedule_name,

@@ -11,7 +11,41 @@ from app.core.workflow_validation import (
     WorkflowStateValidationError,
     WorkflowValidationError,
 )
-from app.core.config import WorkflowConfigLoadError
+from app.core.config import (
+    BitbucketProjectConfig,
+    BusinessValueParameters,
+    ConfluenceProjectConfig,
+    JiraBacklogConfig,
+    JiraFieldsConfig,
+    JiraProjectConfig,
+    ProjectConfig,
+    StrategyPagesConfig,
+    WorkflowConfigLoadError,
+)
+
+
+def _project(*, titles=(), urls=(), space_keys=(), fail_on_missing=True):
+    return ProjectConfig(
+        jira=JiraProjectConfig(
+            "https://example.atlassian.net",
+            "SHOP",
+            JiraFieldsConfig("customfield_1", "customfield_2"),
+            JiraBacklogConfig("", "backlog-curation-ignore"),
+        ),
+        bitbucket=BitbucketProjectConfig("acme", "widgets"),
+        confluence=ConfluenceProjectConfig(
+            "https://example.atlassian.net",
+            StrategyPagesConfig(
+                tuple(titles), tuple(urls), tuple(space_keys), fail_on_missing
+            ),
+        ),
+        business_value_parameters=BusinessValueParameters({
+            "customerImpact": 0.35,
+            "revenueOrCostImpact": 0.25,
+            "strategicAlignment": 0.25,
+            "riskReduction": 0.15,
+        }),
+    )
 
 
 def _response_payload(response):
@@ -141,6 +175,7 @@ def test_cli_workflow_path_overrides_environment(monkeypatch, tmp_path):
     uvicorn_calls = []
     monkeypatch.setenv("WORKFLOW_PATH", str(environment_path))
     monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(main, "validate_startup_configuration", lambda: None)
     monkeypatch.setattr(
         main.uvicorn,
         "run",
@@ -157,6 +192,7 @@ def test_debug_flag_sets_root_logger_to_debug(monkeypatch):
     uvicorn_calls = []
     root_logger = logging.getLogger()
     monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(main, "validate_startup_configuration", lambda: None)
     monkeypatch.setattr(root_logger, "level", logging.INFO)
     monkeypatch.setattr(
         main.uvicorn,
@@ -173,12 +209,42 @@ def test_debug_flag_sets_root_logger_to_debug(monkeypatch):
 def test_default_launch_preserves_logging_level(monkeypatch):
     root_logger = logging.getLogger()
     monkeypatch.setattr(main, "_workflow_path", None)
+    monkeypatch.setattr(main, "validate_startup_configuration", lambda: None)
     monkeypatch.setattr(root_logger, "level", logging.WARNING)
     monkeypatch.setattr(main.uvicorn, "run", lambda *args, **kwargs: None)
 
     main.run([])
 
     assert root_logger.level == logging.WARNING
+
+
+def test_configuration_validation_failure_exits_before_server_start(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(main, "_workflow_path", None)
+
+    def fail_validation():
+        raise main.ProjectCredentialValidationError(
+            "Set CONFLUENCE_USER_EMAIL in the environment."
+        )
+
+    monkeypatch.setattr(
+        main,
+        "validate_startup_configuration",
+        fail_validation,
+    )
+    monkeypatch.setattr(
+        main.uvicorn,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("The server must not start"),
+    )
+
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exc_info:
+        main.run([])
+
+    assert exc_info.value.code == 1
+    assert "Set CONFLUENCE_USER_EMAIL" in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_missing_selected_workflow_fails_before_external_services(
@@ -210,6 +276,35 @@ def test_missing_selected_workflow_fails_before_external_services(
     assert str(workflow_path) in caplog.text
 
 
+def test_missing_confluence_credentials_are_reported_without_traceback(
+    monkeypatch, tmp_path, caplog
+):
+    project = _project(urls=("https://example.atlassian.net/wiki/spaces/ONE/overview",))
+    monkeypatch.setattr(main, "_workflow_path", tmp_path / "WORKFLOW.md")
+    monkeypatch.setattr(main, "load_config", lambda _path: {"phases": {}})
+    monkeypatch.setattr(main, "load_project_config", lambda *_args: project)
+    monkeypatch.setattr(main.settings, "CONFLUENCE_USER_EMAIL", "")
+    monkeypatch.setattr(main.settings, "CONFLUENCE_API_TOKEN", "")
+    monkeypatch.setattr(
+        main,
+        "JiraClient",
+        lambda *_args: pytest.fail("Adapters must not be constructed"),
+    )
+
+    async def enter_lifespan():
+        context = main.lifespan(None)
+        with pytest.raises(main.ProjectCredentialValidationError):
+            await context.__aenter__()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(enter_lifespan())
+
+    assert "Confluence strategy pages are configured" in caplog.text
+    assert "CONFLUENCE_USER_EMAIL" in caplog.text
+    assert "CONFLUENCE_API_TOKEN" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_empty_strategy_references_create_no_confluence_client(monkeypatch):
     monkeypatch.setattr(
         main,
@@ -232,13 +327,14 @@ def test_empty_strategy_references_create_no_confluence_client(monkeypatch):
                     }
                 },
             )
-        ]
+        ],
+        _project(),
     )
 
     assert providers == {}
 
 
-def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
+def test_each_enabled_curator_uses_project_confluence_configuration(monkeypatch):
     created = []
 
     class FakeConfluenceClient:
@@ -284,22 +380,35 @@ def test_each_enabled_curator_gets_a_scoped_confluence_client(monkeypatch):
                     }
                 },
             ),
-        ]
+        ],
+        _project(
+            titles=("Strategy One",),
+            space_keys=("ONE",),
+            fail_on_missing=False,
+        ),
     )
 
     assert providers == {"one": created[0], "two": created[1]}
     assert created[0].kwargs == {
         "space_keys": ["ONE"],
         "fail_on_missing_documents": False,
+        "project": _project(
+            titles=("Strategy One",),
+            space_keys=("ONE",),
+            fail_on_missing=False,
+        ).confluence,
     }
     assert created[0].fetched == [["Strategy One"]]
     assert created[1].kwargs == {
-        "space_keys": [],
-        "fail_on_missing_documents": True,
+        "space_keys": ["ONE"],
+        "fail_on_missing_documents": False,
+        "project": _project(
+            titles=("Strategy One",),
+            space_keys=("ONE",),
+            fail_on_missing=False,
+        ).confluence,
     }
-    assert created[1].fetched == [
-        ["https://example.atlassian.net/wiki/spaces/TWO/overview"],
-    ]
+    assert created[1].fetched == [["Strategy One"]]
 
 
 def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypatch, caplog):
@@ -317,8 +426,9 @@ def test_lifespan_does_not_start_thread_when_workflow_validation_fails(monkeypat
             assert configured_registry is registry
 
     monkeypatch.setattr(main, "load_config", lambda _path: {"phases": {}})
-    monkeypatch.setattr(main, "JiraClient", lambda: tracker)
-    monkeypatch.setattr(main, "BitbucketService", FakeBitbucket)
+    monkeypatch.setattr(main, "load_project_config", lambda *_args: _project())
+    monkeypatch.setattr(main, "JiraClient", lambda _config: tracker)
+    monkeypatch.setattr(main, "BitbucketService", lambda _config: FakeBitbucket())
     monkeypatch.setattr(main, "ActionRegistry", lambda: registry)
 
     class FailingOrchestrator:
@@ -390,8 +500,9 @@ def test_lifespan_logs_state_misconfiguration_without_traceback(monkeypatch, cap
             )
 
     monkeypatch.setattr(main, "load_config", lambda _path: {"phases": {}})
-    monkeypatch.setattr(main, "JiraClient", FakeTracker)
-    monkeypatch.setattr(main, "BitbucketService", FakeBitbucket)
+    monkeypatch.setattr(main, "load_project_config", lambda *_args: _project())
+    monkeypatch.setattr(main, "JiraClient", lambda _config: FakeTracker())
+    monkeypatch.setattr(main, "BitbucketService", lambda _config: FakeBitbucket())
     monkeypatch.setattr(main, "ActionRegistry", lambda: registry)
     monkeypatch.setattr(main, "SymphonyOrchestrator", FailingOrchestrator)
     monkeypatch.setattr(
@@ -469,8 +580,9 @@ def test_lifespan_constructs_and_injects_jira_tracker(monkeypatch, tmp_path):
         return config
 
     monkeypatch.setattr(main, "load_config", load_selected_config)
-    monkeypatch.setattr(main, "JiraClient", lambda: tracker)
-    monkeypatch.setattr(main, "BitbucketService", lambda: bitbucket)
+    monkeypatch.setattr(main, "load_project_config", lambda *_args: _project())
+    monkeypatch.setattr(main, "JiraClient", lambda _config: tracker)
+    monkeypatch.setattr(main, "BitbucketService", lambda _config: bitbucket)
     monkeypatch.setattr(main, "ActionRegistry", lambda: registry)
     monkeypatch.setattr(main, "SymphonyOrchestrator", FakeOrchestrator)
     monkeypatch.setattr(main.threading, "Thread", FakeThread)
@@ -509,8 +621,9 @@ def test_lifespan_does_not_start_thread_when_action_registration_fails(monkeypat
             pass
 
     monkeypatch.setattr(main, "load_config", lambda _path: {"phases": {"plan": {}}})
-    monkeypatch.setattr(main, "JiraClient", FakeTracker)
-    monkeypatch.setattr(main, "BitbucketService", FailingBitbucket)
+    monkeypatch.setattr(main, "load_project_config", lambda *_args: _project())
+    monkeypatch.setattr(main, "JiraClient", lambda _config: FakeTracker())
+    monkeypatch.setattr(main, "BitbucketService", lambda _config: FailingBitbucket())
     monkeypatch.setattr(
         main,
         "SymphonyOrchestrator",

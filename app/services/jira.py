@@ -9,7 +9,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote
-from app.core.config import settings
+from app.core.config import JiraBacklogConfig, JiraFieldsConfig, JiraProjectConfig, settings
 from app.core.workflow_validation import (
     WorkflowStateValidationError,
     WorkflowValidationError,
@@ -25,11 +25,19 @@ from app.services.backlog import (
 class JiraClient:
     STATUS_SEARCH_PAGE_SIZE = 100
 
-    def __init__(self):
-        settings.validate_jira()
+    def __init__(self, project: JiraProjectConfig | None = None):
+        if not settings.JIRA_USER_EMAIL or not settings.JIRA_API_TOKEN:
+            raise ValueError("Missing Jira user or API token in environment")
+        project = project or JiraProjectConfig(
+            host=settings.JIRA_HOST,
+            key=settings.JIRA_PROJECT_KEY,
+            fields=JiraFieldsConfig("", ""),
+            backlog=JiraBacklogConfig("", "backlog-curation-ignore"),
+        )
+        self.project = project
         self.auth = HTTPBasicAuth(settings.JIRA_USER_EMAIL, settings.JIRA_API_TOKEN)
         self.headers = {"Accept": "application/json"}
-        self.base_url = settings.JIRA_HOST.rstrip("/")
+        self.base_url = project.host.rstrip("/")
         self.request_timeout = (
             settings.HTTP_CONNECT_TIMEOUT_SECONDS,
             settings.HTTP_READ_TIMEOUT_SECONDS,
@@ -107,7 +115,7 @@ class JiraClient:
     ) -> list[dict[str, Any]]:
         """Fetch and normalize every issue in the configured curation scope."""
         effective_jql = jql.strip() if isinstance(jql, str) and jql.strip() else (
-            f"project = '{settings.JIRA_PROJECT_KEY}' AND status = 'To Do'"
+            f"project = '{self.project.key}' AND status = 'To Do'"
         )
         fields = [
             "summary",
@@ -154,6 +162,7 @@ class JiraClient:
 
         phase_config = phase_result.phase_config or {}
         jira_config = phase_config.get("jira", {})
+        fields = self.project.fields
         confidence = phase_config.get("confidence", {})
         dry_run = bool(phase_config.get("dry_run", True))
         input_path = self._resolve_output_path(
@@ -185,8 +194,8 @@ class JiraClient:
             if issue_key not in fresh_cache:
                 fresh_cache[issue_key] = self._fetch_curation_issue(
                     issue_key,
-                    jira_config["business_value_score_field"],
-                    jira_config["business_value_rationale_field"],
+                    fields.business_value_score,
+                    fields.business_value_rationale,
                 )
             return fresh_cache[issue_key]
 
@@ -282,8 +291,8 @@ class JiraClient:
                 self._update_issue_fields(
                     value.issueKey,
                     {
-                        jira_config["business_value_score_field"]: value.score,
-                        jira_config["business_value_rationale_field"]: value.rationale,
+                        fields.business_value_score: value.score,
+                        fields.business_value_rationale: value.rationale,
                     },
                 )
                 mark_known_update(value.issueKey)
@@ -626,7 +635,7 @@ class JiraClient:
 
     def _fetch_project_id(self) -> str:
         """Resolve the configured Jira project key to its numeric project ID."""
-        project_key = quote(settings.JIRA_PROJECT_KEY, safe="")
+        project_key = quote(self.project.key, safe="")
         url = f"{self.base_url}/rest/api/3/project/{project_key}"
         try:
             response = requests.get(
@@ -736,15 +745,16 @@ class JiraClient:
         for phase_name, phase in enabled:
             path = f"scheduled_phases.{phase_name}"
             jira_config = phase["jira"]
+            fields_config = self.project.fields
             field_ids = [
-                jira_config["business_value_score_field"],
-                jira_config["business_value_rationale_field"],
+                fields_config.business_value_score,
+                fields_config.business_value_rationale,
             ]
-            if jira_config.get("epic_field"):
-                field_ids.append(jira_config["epic_field"])
+            if fields_config.epic:
+                field_ids.append(fields_config.epic)
             for field_id in field_ids:
                 if field_id not in available_fields:
-                    errors.append(f"{path}.jira: unknown Jira field '{field_id}'")
+                    errors.append(f"project.jira.fields: unknown Jira field '{field_id}'")
             link_type = jira_config["dependency_link_type"]
             if link_type not in available_link_types:
                 errors.append(f"{path}.jira.dependency_link_type: unknown Jira link type '{link_type}'")
@@ -1116,7 +1126,7 @@ class JiraClient:
         """Return issues in the phase-configured states using the modern /jql endpoint."""
         # Escape statuses with single quotes
         states_jql = ", ".join([f"'{state}'" for state in active_states])
-        jql = f"project = '{settings.JIRA_PROJECT_KEY}' AND status IN ({states_jql}) ORDER BY priority ASC, created ASC"
+        jql = f"project = '{self.project.key}' AND status IN ({states_jql}) ORDER BY priority ASC, created ASC"
         
         # Appended /jql to migrate to the mandatory Atlassian endpoint
         url = f"{self.base_url}/rest/api/3/search/jql"

@@ -3,6 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.config import (
+    BitbucketProjectConfig,
+    BusinessValueParameters,
+    ConfluenceProjectConfig,
+    JiraBacklogConfig,
+    JiraFieldsConfig,
+    JiraProjectConfig,
+    ProjectConfig,
+    StrategyPagesConfig,
+)
 from app.models.agent_config import AgentConfig
 from app.services.actions import PhaseResult
 from app.services.agent import AgentExecutionResult
@@ -21,6 +31,23 @@ WEIGHTS = {
     "strategicAlignment": 0.25,
     "riskReduction": 0.15,
 }
+
+
+def _project(*, titles=(), urls=(), space_keys=()):
+    return ProjectConfig(
+        jira=JiraProjectConfig(
+            host="https://example.atlassian.net",
+            key="SHOP",
+            fields=JiraFieldsConfig("customfield_1", "customfield_2"),
+            backlog=JiraBacklogConfig("", "backlog-curation-ignore"),
+        ),
+        bitbucket=BitbucketProjectConfig("acme", "widgets"),
+        confluence=ConfluenceProjectConfig(
+            "https://example.atlassian.net",
+            StrategyPagesConfig(tuple(titles), tuple(urls), tuple(space_keys), True),
+        ),
+        business_value_parameters=BusinessValueParameters(WEIGHTS),
+    )
 
 
 def _ticket(key, *, updated="v1", links=None, score=None, rationale=None):
@@ -124,23 +151,15 @@ def test_input_provider_requires_configured_strategy_documents():
         def fetch_backlog_issues(self, *_args, **_kwargs):
             return [_ticket("SHOP-1")]
 
-    provider = BacklogCurationInputProvider(Tracker(), None)
+    provider = BacklogCurationInputProvider(
+        Tracker(), None, _project(titles=("Product Strategy",), space_keys=("STRATEGY",))
+    )
     with pytest.raises(ValueError, match="strategy context is configured"):
         provider.build_input(
             "curation",
             "curation:2026-09-03",
             {
                 "audit_issue": "SHOP-CURATION",
-                "input": {
-                    "strategy_pages": {
-                        "titles": ["Product Strategy"],
-                        "space_keys": ["STRATEGY"],
-                    }
-                },
-                "jira": {
-                    "business_value_score_field": "customfield_1",
-                    "business_value_rationale_field": "customfield_2",
-                },
             },
         )
 
@@ -162,23 +181,20 @@ def test_input_provider_fetches_strategy_documents_by_name():
             assert urls == []
             return []
 
-    provider = BacklogCurationInputProvider(Tracker(), {"curation": Documents()})
+    provider = BacklogCurationInputProvider(
+        Tracker(),
+        {"curation": Documents()},
+        _project(
+            titles=("Product Strategy", "Product Goals 2027"),
+            space_keys=("STRATEGY",),
+        ),
+    )
     payload = json.loads(
         provider.build_input(
             "curation",
             "curation:2026-09-03",
             {
                 "audit_issue": "SHOP-CURATION",
-                "input": {
-                    "strategy_pages": {
-                        "titles": ["Product Strategy", "Product Goals 2027"],
-                        "space_keys": ["STRATEGY"],
-                    }
-                },
-                "jira": {
-                    "business_value_score_field": "customfield_1",
-                    "business_value_rationale_field": "customfield_2",
-                },
             },
         )
     )
@@ -211,27 +227,24 @@ def test_input_provider_combines_titles_and_urls_and_deduplicates_by_page_id():
                 {"id": "99", "title": "Product Home", "text": "Goals"},
             ]
 
-    provider = BacklogCurationInputProvider(Tracker(), {"curation": Documents()})
+    provider = BacklogCurationInputProvider(
+        Tracker(),
+        {"curation": Documents()},
+        _project(
+            titles=("Product Strategy",),
+            urls=(
+                "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Product+Strategy",
+                "https://example.atlassian.net/wiki/spaces/PRODUCT/overview",
+            ),
+            space_keys=("STRATEGY",),
+        ),
+    )
     payload = json.loads(
         provider.build_input(
             "curation",
             "curation:2026-09-03",
             {
                 "audit_issue": "SHOP-CURATION",
-                "input": {
-                    "strategy_pages": {
-                        "titles": ["Product Strategy"],
-                        "urls": [
-                            "https://example.atlassian.net/wiki/spaces/STRATEGY/pages/42/Product+Strategy",
-                            "https://example.atlassian.net/wiki/spaces/PRODUCT/overview",
-                        ],
-                        "space_keys": ["STRATEGY"],
-                    }
-                },
-                "jira": {
-                    "business_value_score_field": "customfield_1",
-                    "business_value_rationale_field": "customfield_2",
-                },
             },
         )
     )
@@ -282,6 +295,7 @@ def test_apply_curation_routes_confidence_cycles_and_clarifications(tmp_path):
     _write_result(tmp_path, result_payload)
 
     client = JiraClient.__new__(JiraClient)
+    client.project = _project().jira
     fresh = {ticket["key"]: dict(ticket) for ticket in tickets}
     calls = {"fields": [], "labels": [], "links": [], "comments": [], "properties": []}
     client._fetch_curation_issue = lambda key, *_args: fresh[key]
@@ -307,8 +321,6 @@ def test_apply_curation_routes_confidence_cycles_and_clarifications(tmp_path):
         phase_config={
             "dry_run": False,
             "jira": {
-                "business_value_score_field": "customfield_1",
-                "business_value_rationale_field": "customfield_2",
                 "clarification_label": "needs-clarification",
                 "review_label": "backlog-agent-review",
                 "dependency_link_type": "Blocks",
@@ -332,6 +344,7 @@ def test_apply_curation_routes_confidence_cycles_and_clarifications(tmp_path):
 
 def test_jira_backlog_search_pages_and_excludes_audit_and_ignore_label(monkeypatch):
     client = JiraClient.__new__(JiraClient)
+    client.project = _project().jira
     client.base_url = "https://example.atlassian.net"
     client.headers = {"Accept": "application/json"}
     client.auth = object()
@@ -362,7 +375,7 @@ def test_jira_backlog_search_pages_and_excludes_audit_and_ignore_label(monkeypat
 
     monkeypatch.setattr(jira_module.requests, "get", fake_get)
     issues = client.fetch_backlog_issues(
-        "project = SHOP",
+        "",
         score_field="customfield_1",
         rationale_field="customfield_2",
         audit_issue="SHOP-CURATION",
@@ -370,6 +383,7 @@ def test_jira_backlog_search_pages_and_excludes_audit_and_ignore_label(monkeypat
     )
     assert [issue["key"] for issue in issues] == ["SHOP-1", "SHOP-3"]
     assert calls[1]["nextPageToken"] == "next"
+    assert calls[0]["jql"] == "project = 'SHOP' AND status = 'To Do'"
     assert "issuelinks" in calls[0]["fields"]
 
 
@@ -381,6 +395,7 @@ def test_apply_curation_protects_stale_and_human_values(tmp_path):
         _result(ticketValues=[_value("SHOP-1"), _value("SHOP-2")]),
     )
     client = JiraClient.__new__(JiraClient)
+    client.project = _project().jira
     fresh = {
         "SHOP-1": _ticket("SHOP-1", updated="v2"),
         "SHOP-2": _ticket("SHOP-2", score=20, rationale="Human"),
@@ -403,8 +418,6 @@ def test_apply_curation_protects_stale_and_human_values(tmp_path):
         phase_config={
             "dry_run": False,
             "jira": {
-                "business_value_score_field": "customfield_1",
-                "business_value_rationale_field": "customfield_2",
                 "clarification_label": "needs-clarification",
                 "review_label": "review",
                 "dependency_link_type": "Blocks",
@@ -466,6 +479,7 @@ def test_business_value_retry_recovers_lost_update_response(tmp_path):
     stored_property = {}
     update_calls = 0
     client = JiraClient.__new__(JiraClient)
+    client.project = _project().jira
     client._fetch_curation_issue = lambda *_args: dict(current)
     client._get_curator_property = lambda _key: dict(stored_property)
 
@@ -496,8 +510,6 @@ def test_business_value_retry_recovers_lost_update_response(tmp_path):
         phase_config={
             "dry_run": False,
             "jira": {
-                "business_value_score_field": "customfield_1",
-                "business_value_rationale_field": "customfield_2",
                 "clarification_label": "needs-clarification",
                 "review_label": "review",
                 "dependency_link_type": "Blocks",

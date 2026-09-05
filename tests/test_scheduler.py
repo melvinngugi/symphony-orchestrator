@@ -19,25 +19,7 @@ def _scheduled_config(action="test:record"):
                 "timezone": "Europe/Vienna",
                 "audit_issue": "SHOP-CURATION",
                 "dry_run": True,
-                "input": {
-                    "jql": "",
-                    "ignore_label": "backlog-curation-ignore",
-                    "strategy_pages": {
-                        "titles": [],
-                        "urls": [],
-                        "space_keys": [],
-                        "fail_on_missing": True,
-                    },
-                    "scoring_weights": {
-                        "customerImpact": 0.35,
-                        "revenueOrCostImpact": 0.25,
-                        "strategicAlignment": 0.25,
-                        "riskReduction": 0.15,
-                    },
-                },
                 "jira": {
-                    "business_value_score_field": "customfield_10001",
-                    "business_value_rationale_field": "customfield_10002",
                     "clarification_label": "needs-clarification",
                     "review_label": "backlog-agent-review",
                     "dependency_link_type": "Blocks",

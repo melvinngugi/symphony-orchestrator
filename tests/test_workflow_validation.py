@@ -5,7 +5,7 @@ from app.core.workflow_validation import (
     collect_workflow_state_references,
     validate_workflow_config,
 )
-from app.core.config import load_config
+from app.core.config import ProjectConfigLoadError, load_config, load_project_config
 from app.services.actions import ActionRegistry
 from app.services.bitbucket import BitbucketService
 from app.services.jira import JiraClient
@@ -163,27 +163,26 @@ def test_curator_strategy_pages_configuration_is_strictly_validated(
     strategy_pages, expected_error
 ):
     config = _enabled_curator_config()
-    config["scheduled_phases"]["backlog_curation"]["input"][
-        "strategy_pages"
-    ] = strategy_pages
+    config["project"]["confluence"]["strategy_pages"] = strategy_pages
 
-    with pytest.raises(WorkflowValidationError, match=expected_error):
-        validate_workflow_config(config, _adapter_actions())
+    with pytest.raises(ProjectConfigLoadError, match=expected_error):
+        load_project_config(config, "WORKFLOW.md")
 
 
 def test_curator_rejects_replaced_confluence_fields():
     config = _enabled_curator_config()
-    config["scheduled_phases"]["backlog_curation"]["input"][
-        "confluence_space_keys"
-    ] = ["STRATEGY"]
+    config["scheduled_phases"]["backlog_curation"]["input"] = {
+        "strategy_pages": {}
+    }
 
-    with pytest.raises(WorkflowValidationError, match="replaced by input.strategy_pages"):
+    with pytest.raises(WorkflowValidationError, match="project.confluence.strategy_pages"):
         validate_workflow_config(config, _adapter_actions())
 
 
 def test_curator_accepts_urls_without_title_search_spaces():
     config = _enabled_curator_config()
-    config["scheduled_phases"]["backlog_curation"]["input"]["strategy_pages"] = {
+    config["project"]["confluence"]["host"] = "https://example.atlassian.net"
+    config["project"]["confluence"]["strategy_pages"] = {
         "titles": [],
         "urls": [
             "https://example.atlassian.net/wiki/spaces/STRATEGY/overview"
@@ -192,4 +191,4 @@ def test_curator_accepts_urls_without_title_search_spaces():
         "fail_on_missing": True,
     }
 
-    validate_workflow_config(config, _adapter_actions())
+    load_project_config(config, "WORKFLOW.md")

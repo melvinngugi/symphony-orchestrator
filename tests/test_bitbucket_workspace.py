@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.config import BitbucketProjectConfig
 from app.services import bitbucket as bitbucket_module
 from app.models.agent_config import AgentConfig
 from app.services.actions import ActionRegistry, PhaseResult
@@ -27,6 +28,18 @@ def test_service_uses_configured_workspace_root(monkeypatch, tmp_path):
 
     assert service.base_workdir == str(workspace_root)
     assert workspace_root.is_dir()
+
+
+def test_service_uses_injected_repository_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(bitbucket_module.settings, "WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_USER_EMAIL", "bot@example.com")
+    monkeypatch.setattr(bitbucket_module.settings, "BITBUCKET_API_TOKEN", "test-token")
+
+    service = BitbucketService(BitbucketProjectConfig("injected-space", "injected-repo"))
+
+    assert service.workspace == "injected-space"
+    assert service.repo_slug == "injected-repo"
+    assert service.base_url.endswith("/injected-space/injected-repo")
 
 
 def test_prepare_workspace_clones_into_repository_child(monkeypatch, tmp_path):

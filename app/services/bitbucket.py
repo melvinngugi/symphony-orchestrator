@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 import requests
 from requests.auth import HTTPBasicAuth
-from app.core.config import settings
+from app.core.config import BitbucketProjectConfig, settings
 from app.models.workspace import repository_path
 from app.services.actions import ActionRegistry, PhaseResult
 
@@ -22,10 +22,15 @@ class BitbucketService:
         r"<!--\s*symphony-review:([^:>]+):([0-9A-Za-z._-]+)\s*-->"
     )
 
-    def __init__(self):
-        settings.validate_bitbucket()
-        self.workspace = settings.BITBUCKET_WORKSPACE
-        self.repo_slug = settings.BITBUCKET_REPO_SLUG
+    def __init__(self, project: BitbucketProjectConfig | None = None):
+        if not settings.BITBUCKET_USER_EMAIL or not settings.BITBUCKET_API_TOKEN:
+            raise ValueError("Missing Bitbucket user or API token in environment")
+        project = project or BitbucketProjectConfig(
+            workspace=settings.BITBUCKET_WORKSPACE,
+            repository=settings.BITBUCKET_REPO_SLUG,
+        )
+        self.workspace = project.workspace
+        self.repo_slug = project.repository
         self.auth = HTTPBasicAuth(settings.BITBUCKET_USER_EMAIL, settings.BITBUCKET_API_TOKEN)
         self.base_url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace}/{self.repo_slug}"
         self.base_workdir = settings.WORKSPACE_ROOT

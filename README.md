@@ -131,17 +131,54 @@ in production. Scheduled agents use an artifact-only workspace as their working
 directory and never clone the Bitbucket repository.
 
 The shipped `backlog_curation` phase is disabled until its audit issue and Jira
-custom-field IDs are configured. Enable it first with `dry_run: true`. Its input
-provider pages through the configured JQL, excludes the audit issue and ignore
-label, and optionally resolves Confluence strategy documents by exact title or
-URL. Configure these under `input.strategy_pages` with `titles`, `urls`,
-`space_keys`, and `fail_on_missing` (which defaults to `true`). Titles are searched
+custom-field IDs are configured. All non-secret project configuration lives in the
+top-level `project` block: Jira connection and field data under `project.jira`, the
+Bitbucket repository under `project.bitbucket`, and Confluence strategy sources
+under `project.confluence`. Enable curation first with `dry_run: true`. Its input
+provider pages through `project.jira.backlog.jql`, excludes the audit issue and
+configured ignore label, and optionally resolves Confluence strategy documents by
+exact title or URL. Configure these under `project.confluence.strategy_pages` with
+`titles`, `urls`, `space_keys`, and `fail_on_missing` (which defaults to `true`). Titles are searched
 only in the configured spaces. Same-host URLs may identify a page directly, use
 `/wiki/pages/viewpage.action?pageId=...`, or identify a space overview whose
 homepage is loaded as the strategy document. Mixed results are deduplicated by
 page ID. Empty title and URL lists disable Confluence enrichment and require no
 Confluence credentials. Jira and Confluence credentials stay in the host process;
 the agent sees only normalized JSON marked as untrusted reference data.
+
+```yaml
+project:
+  jira:
+    host: "https://your-domain.atlassian.net"
+    key: "PROJECT"
+    fields:
+      business_value_score: "customfield_10001"
+      business_value_rationale: "customfield_10002"
+      epic: ""
+    backlog:
+      jql: ""
+      ignore_label: "backlog-curation-ignore"
+  bitbucket:
+    workspace: "your-workspace"
+    repository: "your-repository"
+  confluence:
+    host: "https://your-domain.atlassian.net"
+    strategy_pages:
+      titles: []
+      urls: []
+      space_keys: []
+      fail_on_missing: true
+  business_value_parameters: "business_value_parameters.yaml"
+```
+
+Non-empty workflow identity values override `JIRA_HOST`, `JIRA_PROJECT_KEY`,
+`BITBUCKET_WORKSPACE`, `BITBUCKET_REPO_SLUG`, and `CONFLUENCE_HOST`; those
+variables remain fallbacks for omitted or empty values. Credentials are not valid
+project-block fields and remain environment-only.
+
+Before starting Uvicorn, the Symphony CLI validates the selected workflow, its
+project files, and any required Confluence credentials. A validation failure prints
+one actionable error, does not start the server, and exits with status 1.
 
 The `backlog_curator` agent emits `backlog-curation.json`, validated against the
 scope, source snapshot, evidence references, score weights, and domain schema
@@ -171,8 +208,15 @@ The read-only Confluence adapter also exposes generic
 while removing repeated page IDs. Title lookup is exact and case-sensitive,
 searches only configured spaces, and returns all matching pages—including
 same-title pages from different spaces—once per page ID. Configured URLs are
-parsed locally and must match `CONFLUENCE_HOST`; credentials are never sent to a
+parsed locally and must match `project.confluence.host`; credentials are never sent to a
 configured URL or another host.
+
+Business-value weights live in the YAML file referenced by
+`project.business_value_parameters`. Relative references are resolved beside the
+selected workflow file, allowing each project workflow to carry its own parameter
+file. The file must contain `scoring_weights` with exactly `customerImpact`,
+`revenueOrCostImpact`, `strategicAlignment`, and `riskReduction`; non-negative
+weights must sum to 1.
 
 Each phase must define `states`, a list of Jira state names that trigger that phase. The orchestrator queries Jira using the union of all phase states, keeps applying `tracker.required_labels`, and chooses the first phase whose state list matches the issue state (case-insensitively). Phase order no longer advances execution by itself.
 
@@ -182,7 +226,7 @@ Before the orchestration thread starts, Symphony validates the workflow structur
 and registered action names, then delegates state-name validation to the configured
 tracker adapter. The Jira adapter requires phase `states`, `on_start`, and both
 simple and expanded completion targets to match a status available to the configured
-Jira project. Matching is case-insensitive. The adapter resolves `JIRA_PROJECT_KEY`
+Jira project. Matching is case-insensitive. The adapter resolves `project.jira.key`
 to its numeric project ID, then reads every page of Jira's status search API for that
 project, including global statuses used by company-managed workflows. The Jira user
 must have the Administer Projects permission for the project or the Administer Jira
@@ -232,25 +276,27 @@ reachable from a particular issue state remains a runtime concern.
    ```
 
 4. **Environment Configuration:**
-   Create a .env file in the project root with your credentials:
+   Configure project identity in WORKFLOW.md and keep credentials in `.env`:
 
    ```bash
-   #Jira Configuration
-   JIRA_HOST="https://your-domain.atlassian.net"
+   # Jira credentials
    JIRA_USER_EMAIL="your-email@example.com"
    JIRA_API_TOKEN="your-atlassian-api-token"
-   JIRA_PROJECT_KEY="your-key"
 
-   # Required only when strategy_pages.titles or strategy_pages.urls is non-empty
-   CONFLUENCE_HOST="https://your-domain.atlassian.net"
+   # Required only when project.confluence.strategy_pages has titles or URLs
    CONFLUENCE_USER_EMAIL="your-email@example.com"
    CONFLUENCE_API_TOKEN="your-read-only-atlassian-api-token"
 
-   # Bitbucket Configuration
-   BITBUCKET_WORKSPACE="your-workspace"
-   BITBUCKET_REPO_SLUG="your-repo"
+   # Bitbucket credentials
    BITBUCKET_USER_EMAIL="your-email@domain.com"
    BITBUCKET_API_TOKEN="your-bitbucket-scoped-api-token"
+
+   # Optional fallbacks when the matching WORKFLOW.md value is empty or omitted
+   JIRA_HOST="https://your-domain.atlassian.net"
+   JIRA_PROJECT_KEY="your-key"
+   CONFLUENCE_HOST="https://your-domain.atlassian.net"
+   BITBUCKET_WORKSPACE="your-workspace"
+   BITBUCKET_REPO_SLUG="your-repo"
 
    # Workspace Configuration
    WORKSPACE_ROOT="./workspaces"
@@ -352,6 +398,7 @@ podman run --rm -p 8000:8000 --env-file .env \
   -e WORKFLOW_PATH=/config/custom-workflow.md \
   -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
   -v "$(pwd)/WORKFLOW-deltaflow.md:/config/custom-workflow.md:ro" \
+  -v "$(pwd)/business_value_parameters.yaml:/config/business_value_parameters.yaml:ro" \
   symphony-orchestrator:uv
 ```
 
@@ -362,6 +409,7 @@ command:
 podman run --rm -p 8000:8000 --env-file .env \
   -v "${CODEX_HOME:-$HOME/.codex}:/root/.codex" \
   -v "$(pwd)/WORKFLOW-deltaflow.md:/config/custom-workflow.md:ro" \
+  -v "$(pwd)/business_value_parameters.yaml:/config/business_value_parameters.yaml:ro" \
   symphony-orchestrator:uv \
   python -m app.main --workflow /config/custom-workflow.md
 ```

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import re
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -280,91 +279,40 @@ def _inspect_backlog_curation_config(
     path: str,
     errors: list[str],
 ) -> None:
-    input_config = configured.get("input")
     jira_config = configured.get("jira")
     confidence_config = configured.get("confidence")
-    if not isinstance(input_config, dict):
-        errors.append(f"{path}.input: must be a mapping")
-    else:
-        legacy_fields = sorted(
-            field_name
-            for field_name in (
-                "confluence_page_ids",
-                "confluence_page_names",
-                "confluence_space_keys",
-            )
-            if field_name in input_config
+    if "input" in configured:
+        errors.append(
+            f"{path}.input: replaced by project.jira.backlog and "
+            "project.confluence.strategy_pages"
         )
-        for field_name in legacy_fields:
-            errors.append(
-                f"{path}.input.{field_name}: replaced by input.strategy_pages"
-            )
-        strategy_pages = input_config.get("strategy_pages")
-        if not isinstance(strategy_pages, dict):
-            errors.append(f"{path}.input.strategy_pages: must be a mapping")
-        else:
-            allowed_strategy_fields = {
-                "titles",
-                "urls",
-                "space_keys",
-                "fail_on_missing",
-            }
-            extra_fields = sorted(set(strategy_pages) - allowed_strategy_fields)
-            for field_name in extra_fields:
-                errors.append(
-                    f"{path}.input.strategy_pages.{field_name}: unknown configuration field"
-                )
-            for list_name in ("titles", "urls", "space_keys"):
-                values = strategy_pages.get(list_name, [])
-                if not isinstance(values, list) or any(
-                    _non_empty_string(value) is None for value in values
-                ):
-                    errors.append(
-                        f"{path}.input.strategy_pages.{list_name}: "
-                        "must be a list of non-empty strings"
-                    )
-            titles = strategy_pages.get("titles", [])
-            space_keys = strategy_pages.get("space_keys", [])
-            if isinstance(titles, list) and titles and (
-                not isinstance(space_keys, list) or not space_keys
-            ):
-                errors.append(
-                    f"{path}.input.strategy_pages.space_keys: "
-                    "must contain at least one space key when titles are configured"
-                )
-            fail_on_missing = strategy_pages.get("fail_on_missing", True)
-            if not isinstance(fail_on_missing, bool):
-                errors.append(
-                    f"{path}.input.strategy_pages.fail_on_missing: must be a boolean"
-                )
     if not isinstance(jira_config, dict):
         errors.append(f"{path}.jira: must be a mapping")
     else:
+        allowed_jira_fields = {
+            "clarification_label",
+            "review_label",
+            "dependency_link_type",
+        }
+        for field_name in sorted(set(jira_config) - allowed_jira_fields):
+            destination = "project.jira.fields" if field_name in {
+                "business_value_score_field",
+                "business_value_rationale_field",
+                "epic_field",
+            } else f"{path}.jira"
+            errors.append(
+                f"{path}.jira.{field_name}: unknown configuration field; use {destination}"
+            )
         for field_name in (
-            "business_value_score_field",
-            "business_value_rationale_field",
             "clarification_label",
             "review_label",
             "dependency_link_type",
         ):
             if _non_empty_string(jira_config.get(field_name)) is None:
                 errors.append(f"{path}.jira.{field_name}: must be a non-empty string")
-        for field_name in (
-            "business_value_score_field",
-            "business_value_rationale_field",
-        ):
-            field_value = _non_empty_string(jira_config.get(field_name))
-            if field_value is not None and re.fullmatch(r"customfield_\d+", field_value) is None:
-                errors.append(f"{path}.jira.{field_name}: must be a Jira customfield_<id>")
         link_type = _non_empty_string(jira_config.get("dependency_link_type"))
         if link_type is not None and link_type != "Blocks":
             errors.append(f"{path}.jira.dependency_link_type: only 'Blocks' is supported")
-        epic_field = jira_config.get("epic_field")
-        if epic_field not in (None, "") and (
-            not isinstance(epic_field, str)
-            or re.fullmatch(r"customfield_\d+", epic_field.strip()) is None
-        ):
-            errors.append(f"{path}.jira.epic_field: must be empty or a Jira customfield_<id>")
     if not isinstance(confidence_config, dict):
         errors.append(f"{path}.confidence: must be a mapping")
     else:
@@ -376,24 +324,6 @@ def _inspect_backlog_curation_config(
     if not isinstance(dry_run, bool):
         errors.append(f"{path}.dry_run: must be a boolean")
 
-    if isinstance(input_config, dict):
-        jql = input_config.get("jql", "")
-        ignore_label = input_config.get("ignore_label", "backlog-curation-ignore")
-        if not isinstance(jql, str):
-            errors.append(f"{path}.input.jql: must be a string")
-        if _non_empty_string(ignore_label) is None:
-            errors.append(f"{path}.input.ignore_label: must be a non-empty string")
-        weights = input_config.get("scoring_weights")
-        expected_weights = {
-            "customerImpact", "revenueOrCostImpact", "strategicAlignment", "riskReduction"
-        }
-        if not isinstance(weights, dict) or set(weights) != expected_weights:
-            errors.append(f"{path}.input.scoring_weights: must define the four scoring dimensions")
-        elif any(
-            isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
-            for value in weights.values()
-        ) or abs(sum(float(value) for value in weights.values()) - 1.0) > 0.000001:
-            errors.append(f"{path}.input.scoring_weights: values must be non-negative and sum to 1")
 
 
 def _non_empty_string(value: object) -> str | None:

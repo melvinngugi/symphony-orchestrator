@@ -11,6 +11,27 @@ tracker:
   required_labels:
     - "AI"
 
+project:
+  jira:
+    host: "https://myproject.atlassian.net"
+    key: "MYPROJ"
+    fields:
+      business_value_score: "customfield_00000"
+      business_value_rationale: "customfield_00001"
+    backlog:
+      ignore_label: "no-ai"
+  bitbucket:
+    workspace: "myusername"
+    repository: "myrepo"
+  confluence:
+    host: "https://myproject.atlassian.net"
+    strategy_pages:
+      titles: []
+      urls: []
+      space_keys: []
+      fail_on_missing: true
+  business_value_parameters: "business_value_parameters.yaml"
+
 # Enable after replacing the audit issue and custom-field IDs. Keep dry_run true
 # for the first successful report and set it to false only after review.
 scheduled_phases:
@@ -19,25 +40,9 @@ scheduled_phases:
     agent: backlog_curator
     daily_at: "02:00"
     timezone: "Europe/Vienna"
-    audit_issue: "PROJECT-CURATION"
+    audit_issue: "MYPROJ-25"
     dry_run: true
-    input:
-      jql: ""
-      ignore_label: "backlog-curation-ignore"
-      strategy_pages:
-        titles: []
-        urls: []
-        space_keys: []
-        fail_on_missing: true
-      scoring_weights:
-        customerImpact: 0.35
-        revenueOrCostImpact: 0.25
-        strategicAlignment: 0.25
-        riskReduction: 0.15
     jira:
-      business_value_score_field: "customfield_00000"
-      business_value_rationale_field: "customfield_00001"
-      epic_field: ""
       clarification_label: "needs-clarification"
       review_label: "backlog-agent-review"
       dependency_link_type: "Blocks"
